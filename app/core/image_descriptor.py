@@ -106,19 +106,38 @@ def _make_openai_client(settings: Mapping[str, str]) -> Any:
     When the base URL is an OpenRouter endpoint, we attach the
     `HTTP-Referer` and `X-Title` headers that OpenRouter requires for
     free-tier models (otherwise the request is rejected with 401/403).
+
+    Returns ``None`` on any failure. Use `_make_openai_client_with_error`
+    if you need the underlying exception text.
+    """
+    client, _err = _make_openai_client_with_error(settings)
+    return client
+
+
+def _make_openai_client_with_error(
+    settings: Mapping[str, str],
+) -> tuple[Any, str | None]:
+    """
+    Like `_make_openai_client` but also returns the underlying exception
+    text on failure (or ``None`` on success). Used by
+    `describe_image_with_error` to surface the real reason in the log.
     """
     try:
         from openai import OpenAI  # type: ignore
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"не удалось импортировать openai: {exc}"
     api_key = settings.get("llm_api_key") or ""
     if not api_key:
-        return None
+        return None, "API-ключ пустой"
     base_url = settings.get("llm_base_url") or None
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
-    except Exception:
-        return None
+        client = (
+            OpenAI(api_key=api_key, base_url=base_url)
+            if base_url
+            else OpenAI(api_key=api_key)
+        )
+    except Exception as exc:
+        return None, f"OpenAI() упал: {type(exc).__name__}: {exc}"
     # OpenRouter identifies the calling app via these headers. Setting them
     # is harmless when pointing at other providers (the SDK forwards all
     # `default_headers` as request headers).
@@ -128,9 +147,11 @@ def _make_openai_client(settings: Mapping[str, str]) -> Any:
                 "HTTP-Referer": "https://github.com/markitdown-gui",
                 "X-Title": "markitdown_gui",
             })
-        except Exception:
+        except Exception as exc:
+            # Header attachment failure is non-fatal — the request can
+            # still be sent, just might be rejected by OpenRouter.
             pass
-    return client
+    return client, None
 
 
 def _call_llm(
@@ -268,9 +289,13 @@ def describe_image_with_error(
     if not settings.get("llm_api_key"):
         return None, "API-ключ LLM не задан"
 
-    client = _make_openai_client(settings)
+    client, client_err = _make_openai_client_with_error(settings)
     if client is None:
-        return None, "не удалось создать OpenAI-клиент (проверьте зависимости)"
+        # `client_err` carries the real reason (missing import, bad
+        # constructor, etc.). Fall back to a generic hint only when the
+        # helper itself yielded nothing.
+        reason = client_err or "не удалось создать OpenAI-клиент"
+        return None, reason
 
     try:
         data_uri = _data_uri(path)

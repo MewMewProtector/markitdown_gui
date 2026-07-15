@@ -11,6 +11,7 @@ dependencies = [
     "markitdown[all]==0.1.6",
     "PySide6>=6.7.0,<7",
     "pymupdf>=1.24.0",
+    "openai>=1.40.0",
 ]
 
 [project.scripts]

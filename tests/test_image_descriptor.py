@@ -76,7 +76,8 @@ class TestImageDescriptor(unittest.TestCase):
         fake_client.chat.completions.create.return_value = fake_response
 
         with mock.patch.object(
-            desc, "_make_openai_client", return_value=fake_client
+            desc, "_make_openai_client_with_error",
+            return_value=(fake_client, None),
         ) as make_client:
             result = desc.describe_image_via_cache(path, settings)
 
@@ -106,7 +107,7 @@ class TestImageDescriptor(unittest.TestCase):
         )
 
         with mock.patch.object(
-            desc, "_make_openai_client"
+            desc, "_make_openai_client_with_error"
         ) as make_client:
             result = desc.describe_image_via_cache(path, settings)
 
@@ -188,7 +189,8 @@ class TestImageDescriptor(unittest.TestCase):
             "401 Unauthorized"
         )
         with mock.patch.object(
-            desc, "_make_openai_client", return_value=fake_client
+            desc, "_make_openai_client_with_error",
+            return_value=(fake_client, None),
         ):
             description, err = desc.describe_image_with_error(path, settings)
         self.assertIsNone(description)
