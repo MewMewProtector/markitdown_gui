@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from typing import Any, Iterable, List, Tuple
+from typing import Any, Callable, Iterable, List, Tuple, Optional
 
 try:
     from markitdown import MarkItDown
@@ -49,6 +49,19 @@ def import_error() -> str | None:
 # Extensions for which we extract inline images and describe them.
 _INLINE_IMAGE_EXTS = {".pdf", ".docx", ".pptx", ".xlsx"}
 
+# Progress mapping for the inline-image phase. After text extraction the
+# conversion job has emitted ~25%; we reserve 25..80 for image work and
+# 80..100 for writing the markdown to disk. With N images each one gets
+# `(80 - 25) / N` percent of the range, so the user sees motion even on
+# large PDFs.
+_INLINE_PHASE_START = 25
+_INLINE_PHASE_END = 80
+
+
+# A simple callback the caller (ConversionJob) wires to its `progress`
+# signal so the user sees motion while we describe images one by one.
+ProgressCallback = Callable[[int, str], None]
+
 
 class Converter:
     """
@@ -65,6 +78,10 @@ class Converter:
         # Errors collected during the last `convert()` call. Cleared at
         # the start of each call so callers always see the latest run.
         self._last_errors: list[str] = []
+        # Optional callback `cb(percent, message)` fired during long
+        # operations (inline-image LLM calls). The conversion job uses
+        # it to surface per-image progress to the UI.
+        self._progress_cb: Optional[ProgressCallback] = None
 
     # ------------------------------------------------------------------
     # Internal
@@ -177,6 +194,24 @@ class Converter:
         """
         return list(self._last_errors)
 
+    def set_progress_callback(self, cb: Optional[ProgressCallback]) -> None:
+        """
+        Install / clear a progress callback that receives
+        `(percent, message)` updates. Use ``None`` to clear. The callback
+        is invoked from the worker thread, so the callee (typically the
+        QRunnable) is responsible for marshalling onto the GUI thread.
+        """
+        self._progress_cb = cb
+
+    def _emit_progress(self, percent: int, message: str) -> None:
+        if self._progress_cb is None:
+            return
+        try:
+            self._progress_cb(int(percent), str(message))
+        except Exception:
+            # A buggy callback must never break the conversion.
+            pass
+
     # ------------------------------------------------------------------
     # Inline-image description (L2/L3)
     # ------------------------------------------------------------------
@@ -206,9 +241,13 @@ class Converter:
                 images = extract_pdf_images(path, tmp)
             except Exception as exc:
                 return "", [f"не удалось извлечь изображения из PDF: {exc}"]
+            # Materialize once so we know the total and can drive the
+            # progress callback proportionally.
+            image_list = list(images)
             return self._build_inline_markdown(
-                ((img.page_number, img.file_path) for img in images),
+                ((img.page_number, img.file_path) for img in image_list),
                 group_by_page=True,
+                total=len(image_list),
             )
         finally:
             # Surgical cleanup: `tmp` was created empty by mkdtemp and only
@@ -239,12 +278,12 @@ class Converter:
                 return "", [
                     f"не удалось извлечь изображения из {ext}: {exc}"
                 ]
-            # Office formats don't carry page metadata in the same way,
-            # so we just list everything in source order.
+            image_list = list(images)
             return self._build_inline_markdown(
-                ((0, img.file_path) for img in images),
+                ((0, img.file_path) for img in image_list),
                 group_by_page=False,
                 archive_basename=os.path.basename(path),
+                total=len(image_list),
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -255,6 +294,7 @@ class Converter:
         *,
         group_by_page: bool,
         archive_basename: str = "",
+        total: int = 0,
     ) -> tuple[str, list[str]]:
         """
         Describe each image via the cache-backed helper and assemble a
@@ -265,6 +305,10 @@ class Converter:
         `## Page N` headings; otherwise they live in a flat list under a
         single section.
 
+        `total` is the count of items to process (used to drive the
+        progress callback proportionally). When 0, we fall back to
+        materializing the iterable.
+
         Returns `(markdown_section, errors)` where `errors` carries
         diagnostic strings for the failures (one per failed image, with
         the underlying reason).
@@ -273,11 +317,32 @@ class Converter:
         current_page: int | None = None
         described = 0
         failed = 0
-        total = 0
+        processed = 0
         errors: List[str] = []
 
-        for page_num, file_path in items:
-            total += 1
+        # Materialize once so we know the total ahead of time.
+        items_list = list(items)
+        if not total:
+            total = len(items_list)
+
+        phase_span = max(1, _INLINE_PHASE_END - _INLINE_PHASE_START)
+
+        def _percent_for(idx: int) -> int:
+            """Map 0..total → _INLINE_PHASE_START.._INLINE_PHASE_END."""
+            if total <= 0:
+                return _INLINE_PHASE_END
+            ratio = min(1.0, max(0.0, idx / total))
+            return _INLINE_PHASE_START + int(round(ratio * phase_span))
+
+        for page_num, file_path in items_list:
+            processed += 1
+            # Tell the UI which image we're working on BEFORE making the
+            # (possibly slow) LLM call — the user sees motion even when
+            # the LLM takes 30s.
+            self._emit_progress(
+                _percent_for(processed - 1),
+                f"описание картинки {processed}/{total}…",
+            )
             description, err = describe_image_with_error(
                 file_path, self._settings
             )
@@ -306,7 +371,13 @@ class Converter:
                     errors.append(f"{where}: {err}")
             section.append("")
 
-        if not total:
+            self._emit_progress(
+                _percent_for(processed),
+                f"описание картинки {processed}/{total}: "
+                f"{'OK' if description else 'ошибка'}",
+            )
+
+        if not processed:
             return "", errors
 
         header = "## Описания изображений"
@@ -318,7 +389,7 @@ class Converter:
         # rate when re-running.
         if described or failed:
             section.append(
-                f"*Описано: {described}, не удалось: {failed}, всего: {total}.*"
+                f"*Описано: {described}, не удалось: {failed}, всего: {processed}.*"
             )
         return "\n".join(section).rstrip() + "\n", errors
 

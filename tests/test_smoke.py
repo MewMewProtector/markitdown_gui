@@ -130,6 +130,67 @@ class TestConverterDescribeImages(unittest.TestCase):
         self.assertEqual(captured.get("llm_model"), "gpt-4o-mini")
         self.assertEqual(captured.get("llm_prompt"), "Describe it")
 
+    def test_progress_callback_fires_per_image(self):
+        """Each image must produce progress updates so the UI doesn't
+        appear stuck at 25% during a slow multi-image LLM phase."""
+        from app.core.converter import Converter, _INLINE_PHASE_START, _INLINE_PHASE_END
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = os.path.join(tmp, "demo.docx")
+            import zipfile
+            fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 1500
+            fake_txt = b"hello" * 200
+            with zipfile.ZipFile(docx_path, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("[Content_Types].xml", fake_txt)
+                z.writestr("word/document.xml", fake_txt)
+                z.writestr("word/media/a.png", fake_png)
+                z.writestr("word/media/b.png", fake_png)
+                z.writestr("word/media/c.png", fake_png)
+
+            converter = Converter({
+                "describe_images": "1",
+                "llm_api_key": "sk-fake",
+                "llm_base_url": "",
+                "llm_model": "gpt-4o-mini",
+                "llm_prompt": "",
+            })
+            fake_mid = mock.MagicMock()
+            fake_mid.convert.return_value = mock.MagicMock(text_content="# Demo\n")
+            converter._client = fake_mid
+
+            progress_log: list[tuple[int, str]] = []
+
+            def cb(pct: int, msg: str) -> None:
+                progress_log.append((pct, msg))
+
+            converter.set_progress_callback(cb)
+            with mock.patch(
+                "app.core.converter.describe_image_with_error",
+                return_value=("a description", None),
+            ):
+                converter.convert(docx_path)
+
+            # Should have at least one progress event per image, plus
+            # an event before the first call.
+            self.assertGreaterEqual(len(progress_log), 3)
+            # All emitted percents must be in the inline phase range.
+            for pct, _msg in progress_log:
+                self.assertGreaterEqual(pct, _INLINE_PHASE_START)
+                self.assertLessEqual(pct, _INLINE_PHASE_END)
+            # The last percent must be at the top of the phase range
+            # (after all images are processed).
+            self.assertEqual(progress_log[-1][0], _INLINE_PHASE_END)
+            # The user-facing message must change per image.
+            messages = [m for _p, m in progress_log]
+            self.assertTrue(
+                any("1/3" in m for m in messages),
+                f"missing '1/3' in {messages}",
+            )
+            self.assertTrue(
+                any("3/3" in m for m in messages),
+                f"missing '3/3' in {messages}",
+            )
+
 
 class TestInlineImageCleanup(unittest.TestCase):
     """

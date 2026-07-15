@@ -159,7 +159,7 @@ def _call_llm(
     model: str,
     prompt: str,
     data_uri: str,
-    timeout: float = 60.0,
+    timeout: float = 30.0,
 ) -> str | None:
     """Invoke the chat.completions endpoint the same way markitdown does."""
     try:
@@ -185,12 +185,45 @@ def _call_llm(
         return None
 
 
+# Per-image timeout for the LLM call. Kept short on purpose — if a single
+# image can't be described in 30s we'd rather move on and let the user
+# see the failure than block the whole conversion for minutes.
+DEFAULT_LLM_TIMEOUT = 30.0
+
+
+def _classify_llm_error(exc: BaseException) -> str:
+    """
+    Map an exception raised by the openai SDK to a short user-friendly
+    Russian reason. We rely on the SDK's exception class names — they're
+    stable across 1.x.
+    """
+    name = type(exc).__name__
+    cls = name.lower()
+    if "timeout" in cls:
+        return f"таймаут ({DEFAULT_LLM_TIMEOUT:.0f}с)"
+    if "connection" in cls:
+        return "ошибка соединения с LLM"
+    if "authentication" in cls or "apikey" in cls:
+        return "неверный API-ключ"
+    if "permission" in cls:
+        return "нет доступа к модели"
+    if "notfound" in cls or "404" in cls:
+        return "модель не найдена (404)"
+    if "ratelimit" in cls or "429" in cls:
+        return "rate limit exceeded (429)"
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        msg = getattr(exc, "message", None) or str(exc)
+        return f"HTTP {status}: {msg}"
+    return f"{name}: {exc}"
+
+
 def _call_llm_with_error(
     client: Any,
     model: str,
     prompt: str,
     data_uri: str,
-    timeout: float = 60.0,
+    timeout: float = DEFAULT_LLM_TIMEOUT,
 ) -> tuple[str | None, str | None]:
     """Like `_call_llm` but also returns a short error string on failure."""
     try:
@@ -208,13 +241,7 @@ def _call_llm_with_error(
             timeout=timeout,
         )
     except Exception as exc:
-        # The openai SDK raises `APIStatusError` with `.status_code` and
-        # `.message`. Use them when available for a precise reason.
-        status = getattr(exc, "status_code", None)
-        msg = getattr(exc, "message", None) or str(exc)
-        if status is not None:
-            return None, f"HTTP {status}: {msg}"
-        return None, msg
+        return None, _classify_llm_error(exc)
     try:
         content = response.choices[0].message.content
     except (AttributeError, IndexError, KeyError):
@@ -256,11 +283,17 @@ def describe_image_with_error(
     settings: Mapping[str, str],
     *,
     force_refresh: bool = False,
+    timeout: float | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Same as `describe_image_via_cache` but also returns a short reason
     string on failure (empty/None on success). Use this from the converter
     so the user can see WHY a description didn't happen.
+
+    `timeout` overrides the default per-image LLM timeout
+    (DEFAULT_LLM_TIMEOUT = 30s). Keep it short — a single image rarely
+    needs more than that and a long timeout would freeze the UI when
+    the endpoint is unresponsive.
     """
     if not path:
         return None, "empty path"
@@ -291,9 +324,6 @@ def describe_image_with_error(
 
     client, client_err = _make_openai_client_with_error(settings)
     if client is None:
-        # `client_err` carries the real reason (missing import, bad
-        # constructor, etc.). Fall back to a generic hint only when the
-        # helper itself yielded nothing.
         reason = client_err or "не удалось создать OpenAI-клиент"
         return None, reason
 
@@ -302,7 +332,12 @@ def describe_image_with_error(
     except OSError as exc:
         return None, f"не удалось прочитать файл: {exc}"
 
-    description, err = _call_llm_with_error(client, model, prompt, data_uri)
+    effective_timeout = (
+        float(timeout) if timeout is not None else DEFAULT_LLM_TIMEOUT
+    )
+    description, err = _call_llm_with_error(
+        client, model, prompt, data_uri, timeout=effective_timeout
+    )
     if description:
         try:
             config.store_description(
@@ -311,8 +346,6 @@ def describe_image_with_error(
         except Exception:
             pass
         return description, None
-    # If we hit a cache error earlier but the LLM call also failed, surface
-    # the LLM error (it's the more useful one to the user).
     if err is None:
         err = cache_err or "неизвестная ошибка"
     return None, err

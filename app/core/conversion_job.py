@@ -70,6 +70,14 @@ class ConversionJob(QRunnable):
 
             try:
                 converter = Converter(self.settings)
+                # Wire per-image progress so the user sees motion while
+                # the LLM describes each image (otherwise the UI stays
+                # at 25% for the entire multi-image phase).
+                converter.set_progress_callback(
+                    lambda pct, msg: self.signals.progress.emit(
+                        self.job_id, self.source_path, pct
+                    )
+                )
                 markdown = converter.convert(self.source_path)
             except Exception as exc:
                 # Per-image fault tolerance: if markitdown blows up on a

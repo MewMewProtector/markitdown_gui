@@ -234,6 +234,31 @@ class TestImageDescriptor(unittest.TestCase):
         self.assertIsNotNone(client)
         self.assertNotIn("HTTP-Referer", client.default_headers)
 
+    def test_timeout_error_classified_as_timeout(self) -> None:
+        class FakeTimeout(Exception):
+            pass
+        reason = desc._classify_llm_error(FakeTimeout("nope"))
+        self.assertIn("таймаут", reason)
+
+    def test_ratelimit_error_classified(self) -> None:
+        class FakeRateLimit(Exception):
+            pass
+        reason = desc._classify_llm_error(FakeRateLimit("slow down"))
+        self.assertIn("rate limit", reason.lower())
+
+    def test_http_status_error_includes_code(self) -> None:
+        class FakeStatusError(Exception):
+            status_code = 503
+            message = "Service Unavailable"
+        reason = desc._classify_llm_error(FakeStatusError("oops"))
+        self.assertIn("503", reason)
+
+    def test_default_timeout_is_short(self) -> None:
+        # Default must be small enough that one slow image doesn't
+        # freeze the whole conversion.
+        self.assertLessEqual(desc.DEFAULT_LLM_TIMEOUT, 30.0)
+        self.assertGreaterEqual(desc.DEFAULT_LLM_TIMEOUT, 5.0)
+
 
 class TestConverterBuild(unittest.TestCase):
     """Verify that Converter._build adds llm_model / llm_prompt as required."""
