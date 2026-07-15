@@ -131,5 +131,132 @@ class TestConverterDescribeImages(unittest.TestCase):
         self.assertEqual(captured.get("llm_prompt"), "Describe it")
 
 
+class TestInlineImageCleanup(unittest.TestCase):
+    """
+    End-to-end check that the inline-image description path creates and
+    removes its temp directory exactly once, and never touches anything
+    outside `tempfile.gettempdir()`.
+    """
+
+    def setUp(self) -> None:
+        # Isolate the config DB so we don't clobber the real one.
+        os.environ["APPDATA"] = tempfile.mkdtemp(
+            prefix="markitdown_gui_inline_test_home_"
+        )
+        # Force-reload the config module's DB connection.
+        import importlib
+        from app.core import config as _config
+        _config.close_db()
+        importlib.reload(_config)
+        self._config = _config
+
+    def tearDown(self) -> None:
+        self._config.close_db()
+
+    def _build_docx_with_image(self, out_path: str) -> None:
+        import zipfile
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 1500
+        fake_txt = b"hello" * 200
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", fake_txt)
+            z.writestr("word/document.xml", fake_txt)
+            z.writestr("word/media/pic.png", fake_png)
+
+    def test_inline_describe_cleans_temp_dir(self) -> None:
+        from app.core.converter import Converter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = os.path.join(tmp, "demo.docx")
+            self._build_docx_with_image(docx_path)
+
+            converter = Converter({
+                "describe_images": "1",
+                "llm_api_key": "sk-fake",
+                "llm_base_url": "",
+                "llm_model": "gpt-4o-mini",
+                "llm_prompt": "Describe it",
+                "use_plugins": "0",
+            })
+
+            # Stub markitdown so we don't need the real dep for text.
+            fake_mid = mock.MagicMock()
+            fake_result = mock.MagicMock()
+            fake_result.text_content = "# Demo\n\nBody text.\n"
+            fake_mid.convert.return_value = fake_result
+            with mock.patch.object(converter, "_client", fake_mid), \
+                 mock.patch(
+                     "app.core.converter.describe_image_via_cache",
+                     return_value="a yellow square",
+                 ) as describe:
+                out = converter.convert(docx_path)
+
+            # Description block was appended.
+            self.assertIn("## Описания изображений", out)
+            self.assertIn("a yellow square", out)
+            describe.assert_called_once()
+
+            # No temp directory matching our prefix should remain.
+            tmp_root = tempfile.gettempdir()
+            leftovers = [
+                d for d in os.listdir(tmp_root)
+                if d.startswith("markitdown_gui_office_imgs_")
+            ]
+            self.assertEqual(
+                leftovers, [],
+                f"Temp dirs left behind: {leftovers}",
+            )
+
+    def test_inline_describe_off_when_setting_disabled(self) -> None:
+        from app.core.converter import Converter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = os.path.join(tmp, "demo.docx")
+            self._build_docx_with_image(docx_path)
+
+            converter = Converter({
+                "describe_images": "0",
+                "llm_api_key": "sk-fake",
+                "llm_model": "gpt-4o-mini",
+            })
+            fake_mid = mock.MagicMock()
+            fake_result = mock.MagicMock()
+            fake_result.text_content = "# Demo\n"
+            fake_mid.convert.return_value = fake_result
+            with mock.patch.object(converter, "_client", fake_mid), \
+                 mock.patch(
+                     "app.core.converter.describe_image_via_cache",
+                 ) as describe:
+                out = converter.convert(docx_path)
+
+            self.assertNotIn("## Описания изображений", out)
+            describe.assert_not_called()
+
+    def test_inline_describe_no_api_key_no_block(self) -> None:
+        from app.core.converter import Converter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = os.path.join(tmp, "demo.docx")
+            self._build_docx_with_image(docx_path)
+
+            converter = Converter({
+                "describe_images": "1",
+                "llm_api_key": "",
+                "llm_model": "gpt-4o-mini",
+            })
+            fake_mid = mock.MagicMock()
+            fake_result = mock.MagicMock()
+            fake_result.text_content = "# Demo\n"
+            fake_mid.convert.return_value = fake_result
+            with mock.patch.object(converter, "_client", fake_mid), \
+                 mock.patch(
+                     "app.core.converter.describe_image_via_cache",
+                 ) as describe:
+                out = converter.convert(docx_path)
+
+            # Without an API key we don't even try.
+            self.assertNotIn("## Описания изображений", out)
+            describe.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

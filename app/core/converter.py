@@ -5,11 +5,20 @@ PDFs are routed through a custom `pymupdf`-based converter that preserves
 multi-column layouts, headings, and inline emphasis — the default
 `pdfminer` path used by markitdown concatenates two-column papers into a
 single stream of unspaced text.
+
+Image descriptions (L2/L3): when `describe_images` is enabled and the
+input is a PDF / DOCX / PPTX / XLSX, embedded raster images are extracted
+into a fresh temporary directory, described via `image_descriptor` (which
+honors the SQLite cache), and the descriptions are appended to the
+resulting markdown. The temporary directory is removed in a `finally`
+block — only our extracted images live there.
 """
 from __future__ import annotations
 
 import os
-from typing import Any
+import shutil
+import tempfile
+from typing import Any, Iterable, List, Tuple
 
 try:
     from markitdown import MarkItDown
@@ -20,7 +29,12 @@ else:
     _IMPORT_ERROR = None
 
 from .file_filter import is_http_url
-from .image_descriptor import DEFAULT_MODEL, DEFAULT_PROMPT
+from .image_descriptor import (
+    DEFAULT_MODEL,
+    DEFAULT_PROMPT,
+    describe_image_via_cache,
+    is_image_file,
+)
 
 
 def is_available() -> bool:
@@ -29,6 +43,10 @@ def is_available() -> bool:
 
 def import_error() -> str | None:
     return None if _IMPORT_ERROR is None else str(_IMPORT_ERROR)
+
+
+# Extensions for which we extract inline images and describe them.
+_INLINE_IMAGE_EXTS = {".pdf", ".docx", ".pptx", ".xlsx"}
 
 
 class Converter:
@@ -72,7 +90,8 @@ class Converter:
         # When the user opts into image descriptions, also surface the model
         # and prompt to markitdown so its ImageConverter appends a
         # `# Description:` block for `.jpg` / `.jpeg` / `.png` inputs.
-        # PDF / DOCX / etc. are unaffected.
+        # PDF / DOCX / etc. are unaffected by markitdown itself — we
+        # handle them via `_describe_inline_images` below.
         if s.get("describe_images") == "1":
             kwargs["llm_model"] = (s.get("llm_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
             prompt = (s.get("llm_prompt") or DEFAULT_PROMPT).strip()
@@ -102,16 +121,171 @@ class Converter:
         return self._client
 
     def convert(self, path: str) -> str:
-        # URLs and non-PDF files use the standard markitdown path.
-        if not (is_http_url(path) if path.lower().startswith(("http://", "https://")) else False):
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".pdf" and self._settings.get("pdf_engine", "smart") == "smart":
-                from .pdf_converter import extract_markdown, is_available
-                if is_available():
-                    try:
-                        return extract_markdown(path)
-                    except Exception:
-                        # Fall back to markitdown if smart extraction fails.
-                        pass
+        # URLs are handled by markitdown directly — no inline-image
+        # extraction makes sense for remote URLs.
+        if is_http_url(path):
+            result = self.client().convert(path)
+            return getattr(result, "text_content", "") or ""
+
+        ext = os.path.splitext(path)[1].lower()
+
+        # PDF: prefer the smart pymupdf extractor (better multi-column
+        # layout), then optionally append LLM image descriptions.
+        if ext == ".pdf" and self._settings.get("pdf_engine", "smart") == "smart":
+            from .pdf_converter import extract_markdown, is_available as pdf_available
+            if pdf_available():
+                try:
+                    markdown = extract_markdown(path)
+                    if self._should_describe_inline(ext):
+                        markdown += self._describe_inline_pdf(path)
+                    return markdown
+                except Exception:
+                    # Fall back to markitdown if smart extraction fails.
+                    pass
+
+        # DOCX / PPTX / XLSX (and PDF fallback): markitdown for text,
+        # then we extract + describe embedded images ourselves.
         result = self.client().convert(path)
-        return getattr(result, "text_content", "") or ""
+        markdown = getattr(result, "text_content", "") or ""
+
+        if self._should_describe_inline(ext):
+            inline_block = self._describe_inline_office(path, ext)
+            if inline_block:
+                markdown += "\n\n" + inline_block
+
+        return markdown
+
+    # ------------------------------------------------------------------
+    # Inline-image description (L2/L3)
+    # ------------------------------------------------------------------
+    def _should_describe_inline(self, ext: str) -> bool:
+        if ext not in _INLINE_IMAGE_EXTS:
+            return False
+        if self._settings.get("describe_images") != "1":
+            return False
+        # No LLM configured → silently skip (per plan's failure-mode note).
+        if not self._settings.get("llm_api_key"):
+            return False
+        return True
+
+    def _describe_inline_pdf(self, path: str) -> str:
+        """
+        Extract every embedded image from the PDF, describe each one, and
+        return a markdown section grouped by page. The temp directory
+        holding the extracted PNGs is removed before returning.
+        """
+        from .pdf_image_extractor import extract_pdf_images, is_available
+
+        if not is_available():
+            return ""
+        tmp = tempfile.mkdtemp(prefix="markitdown_gui_pdf_imgs_")
+        try:
+            try:
+                images = extract_pdf_images(path, tmp)
+            except Exception:
+                return ""
+            return self._build_inline_markdown(
+                ((img.page_number, img.file_path) for img in images),
+                group_by_page=True,
+            )
+        finally:
+            # Surgical cleanup: `tmp` was created empty by mkdtemp and only
+            # ever contains the PNGs we just wrote. No other files are
+            # touched.
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _describe_inline_office(self, path: str, ext: str) -> str:
+        """
+        Extract every embedded image from a DOCX/PPTX/XLSX, describe each
+        one, and return a markdown section. The temp directory is removed
+        before returning.
+        """
+        from .office_image_extractor import (
+            extract_office_images,
+            is_office_ext,
+        )
+
+        if not is_office_ext(ext):
+            return ""
+        tmp = tempfile.mkdtemp(prefix="markitdown_gui_office_imgs_")
+        try:
+            try:
+                images = extract_office_images(path, tmp)
+            except Exception:
+                return ""
+            # Office formats don't carry page metadata in the same way,
+            # so we just list everything in source order.
+            return self._build_inline_markdown(
+                ((0, img.file_path) for img in images),
+                group_by_page=False,
+                archive_basename=os.path.basename(path),
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _build_inline_markdown(
+        self,
+        items: Iterable[Tuple[int, str]],
+        *,
+        group_by_page: bool,
+        archive_basename: str = "",
+    ) -> str:
+        """
+        Describe each image via the cache-backed helper and assemble a
+        markdown section.
+
+        `items` yields `(page_number, file_path)` tuples. When
+        `group_by_page` is True (PDF case), descriptions are grouped under
+        `## Page N` headings; otherwise they live in a flat list under a
+        single section.
+        """
+        section: List[str] = []
+        current_page: int | None = None
+        described = 0
+        failed = 0
+        total = 0
+
+        for page_num, file_path in items:
+            total += 1
+            try:
+                description = describe_image_via_cache(file_path, self._settings)
+            except Exception:
+                description = None
+
+            if group_by_page and page_num != current_page:
+                section.append(f"## Page {page_num}")
+                section.append("")
+                current_page = page_num
+
+            section.append(
+                f"![{os.path.basename(file_path)}]({file_path})"
+            )
+            section.append("")
+            if description:
+                section.append(f"> {description}")
+                described += 1
+            else:
+                section.append(
+                    "> [не удалось получить описание изображения]"
+                )
+                failed += 1
+            section.append("")
+
+        if not total:
+            return ""
+
+        header = "## Описания изображений"
+        if archive_basename:
+            header += f" — {archive_basename}"
+        section.insert(0, header)
+        section.insert(1, "")
+        # Append a small summary line so the user can see the cache hit
+        # rate when re-running.
+        if described or failed:
+            section.append(
+                f"*Описано: {described}, не удалось: {failed}, всего: {total}.*"
+            )
+        return "\n".join(section).rstrip() + "\n"
+
+
+__all__ = ["Converter", "is_available", "import_error", "is_image_file"]
