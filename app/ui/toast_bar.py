@@ -14,6 +14,13 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel
 
 
+# Visual variants — `center` is used for prominent confirmations
+# (e.g. "Настройки сохранены"); `left` is the default for transient
+# info/error toasts.
+TOAST_VARIANT_LEFT = "left"
+TOAST_VARIANT_CENTER = "center"
+
+
 class ToastBar(QFrame):
     """Slide-down notification banner shown at the top of the main window."""
 
@@ -28,6 +35,7 @@ class ToastBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 6, 14, 6)
         self.label = QLabel(self)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.label)
 
         self._anim = QPropertyAnimation(self, b"pos", self)
@@ -38,15 +46,26 @@ class ToastBar(QFrame):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide_animated)
 
+        # The toast can appear at the top-left or top-center depending on
+        # `show_message(..., variant=...)`. The default stays top-left for
+        # backward compatibility with existing callers.
+        self._variant = TOAST_VARIANT_LEFT
+
     # ------------------------------------------------------------------
     def show_message(
         self,
         text: str,
         kind: str = "info",
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
+        variant: str = TOAST_VARIANT_LEFT,
     ) -> None:
+        self._variant = variant
         if kind == "error":
             self.setObjectName("Toast ToastError")
+        elif variant == TOAST_VARIANT_CENTER:
+            # Distinct object-name so the stylesheet can give it a
+            # more prominent look (rounded pill, slightly larger).
+            self.setObjectName("Toast ToastCenter")
         else:
             self.setObjectName("Toast")
         # Re-polish to apply object-name style change.
@@ -63,8 +82,17 @@ class ToastBar(QFrame):
             self.show()
             return
         end_y = parent.contentsRect().top() + 6
-        x = parent.contentsRect().left() + 16
-        width = max(280, min(640, parent.contentsRect().width() - 32))
+
+        if self._variant == TOAST_VARIANT_CENTER:
+            # A wider, horizontally centered pill near the top edge.
+            width = max(360, min(560, parent.contentsRect().width() - 64))
+            x = parent.contentsRect().left() + (
+                parent.contentsRect().width() - width
+            ) // 2
+        else:
+            width = max(280, min(640, parent.contentsRect().width() - 32))
+            x = parent.contentsRect().left() + 16
+
         self.resize(width, self.height())
         start_pos = self.pos()
         end_pos = self.pos()

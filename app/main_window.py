@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
         # Settings.
         self.settings_view.theme_changed.connect(self._on_theme_changed)
         self.settings_view.accent_changed.connect(self._on_accent_changed)
+        self.settings_view.settings_saved.connect(self._on_settings_saved)
 
         # Drag-n-drop.
         self.setAcceptDrops(True)
@@ -213,6 +214,14 @@ class MainWindow(QMainWindow):
             accent_dark=accent_dark_hex or None,
         )
 
+    def _on_settings_saved(self) -> None:
+        """
+        Fired by SettingsView AFTER settings were persisted to SQLite.
+        Shows a prominent centered toast so the user knows the click took
+        effect (not when the button was pressed, but when the writes
+        actually completed).
+        """
+        self._show_centered_toast("Настройки сохранены", timeout_ms=2200)
     def _apply_theme(
         self,
         mode: str,
@@ -440,6 +449,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _show_toast(self, text: str, kind: str = "info", timeout_ms: int = 3500) -> None:
         self.toast.show_message(text, kind, timeout_ms)
+
+    def _show_centered_toast(self, text: str, kind: str = "info", timeout_ms: int = 2200) -> None:
+        """Prominent top-centered toast used for confirmations."""
+        from .ui.toast_bar import TOAST_VARIANT_CENTER
+        self.toast.show_message(
+            text, kind, timeout_ms, variant=TOAST_VARIANT_CENTER
+        )
 
     # ------------------------------------------------------------------
     # Window helpers

@@ -5,7 +5,7 @@ options (LLM, DI, CU), plugin toggles.
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -72,6 +72,9 @@ class SettingsView(QWidget):
 
     theme_changed = Signal(str)  # "light" | "dark" | "system"
     accent_changed = Signal(str, str)  # accent_hex, accent_dark_hex
+    # Emitted AFTER settings are persisted to SQLite. The main window
+    # shows a centered "Настройки сохранены" toast in response.
+    settings_saved = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -269,6 +272,13 @@ class SettingsView(QWidget):
         self.edit_light_hex.textChanged.connect(self._on_hex_typed)
         self.edit_dark_hex.textChanged.connect(self._on_hex_typed)
 
+        # Ctrl+S saves settings regardless of which sub-widget has focus.
+        self._save_shortcut = QShortcut(
+            QKeySequence.StandardKey.Save, self
+        )
+        self._save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._save_shortcut.activated.connect(self.save)
+
         self.load()
 
     # ------------------------------------------------------------------
@@ -388,6 +398,9 @@ class SettingsView(QWidget):
             "describe_images",
             "1" if self.cb_describe_images.isChecked() else "0",
         )
+
+        # Notify listeners (MainWindow) that persistence actually finished.
+        self.settings_saved.emit()
 
     # ------------------------------------------------------------------
     def _on_theme_changed(self, index: int) -> None:

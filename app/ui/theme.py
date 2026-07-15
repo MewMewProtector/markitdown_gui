@@ -340,6 +340,15 @@ def stylesheet_for(p: Palette) -> str:
     QFrame#ToastError {{
         border-left-color: {p.danger};
     }}
+    QFrame#ToastCenter {{
+        background-color: {p.surface};
+        border: 1px solid {p.accent};
+        border-radius: 18px;
+    }}
+    QFrame#ToastCenter QLabel {{
+        color: {p.text};
+        font-weight: 600;
+    }}
     QFrame#TitleBar {{
         background-color: {p.bg};
         border-bottom: 1px solid {p.border};
