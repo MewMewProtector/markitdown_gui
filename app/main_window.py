@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         effect (not when the button was pressed, but when the writes
         actually completed).
         """
-        self._show_centered_toast("Настройки сохранены", timeout_ms=2200)
+        self._show_centered_toast("Настройки сохранены", timeout_ms=4000)
     def _apply_theme(
         self,
         mode: str,
@@ -473,7 +473,7 @@ class MainWindow(QMainWindow):
     def _show_toast(self, text: str, kind: str = "info", timeout_ms: int = 3500) -> None:
         self.toast.show_message(text, kind, timeout_ms)
 
-    def _show_centered_toast(self, text: str, kind: str = "info", timeout_ms: int = 2200) -> None:
+    def _show_centered_toast(self, text: str, kind: str = "info", timeout_ms: int = 4000) -> None:
         """Prominent top-centered toast used for confirmations."""
         from .ui.toast_bar import TOAST_VARIANT_CENTER
         self.toast.show_message(

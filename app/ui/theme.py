@@ -342,12 +342,17 @@ def stylesheet_for(p: Palette) -> str:
     }}
     QFrame#ToastCenter {{
         background-color: {p.surface};
-        border: 1px solid {p.accent};
-        border-radius: 18px;
+        /* Thick accent border so the confirmation toast is unmistakably
+           linked to the user's chosen accent color. */
+        border: 2px solid {p.accent};
+        border-radius: 20px;
+        padding: 2px;
     }}
     QFrame#ToastCenter QLabel {{
         color: {p.text};
         font-weight: 600;
+        padding-left: 4px;
+        padding-right: 8px;
     }}
     QFrame#TitleBar {{
         background-color: {p.bg};

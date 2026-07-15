@@ -1,17 +1,24 @@
 """
 Animated toast/notification bar that slides in from the top of a parent
 widget and auto-hides after a timeout.
+
+The "center" variant is used for prominent confirmations like
+"Настройки сохранены" — it shows a green check icon on the left, uses
+the theme's accent color for its border, and stays on screen long
+enough to read.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
+    QRectF,
+    QSize,
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 
 # Visual variants — `center` is used for prominent confirmations
@@ -21,22 +28,73 @@ TOAST_VARIANT_LEFT = "left"
 TOAST_VARIANT_CENTER = "center"
 
 
+class _CheckIcon(QWidget):
+    """
+    Small widget that paints a green check inside a filled circle.
+    Used as the leading icon for the centered "settings saved" toast.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(QSize(22, 22))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        # Filled green circle.
+        painter.setBrush(QColor(34, 170, 88))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(rect)
+        # White check stroke inside.
+        pen = QPen(QColor(255, 255, 255))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # Two segments forming a check mark, inset slightly from the circle.
+        r = rect.adjusted(4, 4, -4, -4)
+        x0, y0 = r.left(), r.top()
+        x1, y1 = r.right(), r.bottom()
+        # Short leg of the check (~ 35% from left).
+        short_x = x0 + (x1 - x0) * 0.32
+        short_y = y0 + (y1 - y0) * 0.55
+        # Tip (bottom).
+        tip_x = x0 + (x1 - x0) * 0.48
+        tip_y = y0 + (y1 - y0) * 0.78
+        # Top-right end (~ 80% from left).
+        long_x = x0 + (x1 - x0) * 0.82
+        long_y = y0 + (y1 - y0) * 0.32
+        painter.drawLine(int(short_x), int(short_y), int(tip_x), int(tip_y))
+        painter.drawLine(int(tip_x), int(tip_y), int(long_x), int(long_y))
+        painter.end()
+
+
 class ToastBar(QFrame):
     """Slide-down notification banner shown at the top of the main window."""
 
     DEFAULT_TIMEOUT_MS = 3500
+    # Center variant ("settings saved") gets a longer, comfortable read
+    # time so the user can actually see the confirmation.
+    CENTER_TIMEOUT_MS = 4000
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Toast")
-        self.setFixedHeight(40)
+        self.setFixedHeight(44)
         self.hide()
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 6, 14, 6)
+        layout.setContentsMargins(16, 6, 16, 6)
+        layout.setSpacing(10)
+        # Leading icon (only shown for the center variant).
+        self.icon = _CheckIcon(self)
+        self.icon.hide()
+        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignVCenter)
         self.label = QLabel(self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.label)
+        layout.addWidget(self.label, 1)
 
         self._anim = QPropertyAnimation(self, b"pos", self)
         self._anim.setDuration(220)
@@ -62,12 +120,20 @@ class ToastBar(QFrame):
         self._variant = variant
         if kind == "error":
             self.setObjectName("Toast ToastError")
+            self.icon.hide()
         elif variant == TOAST_VARIANT_CENTER:
             # Distinct object-name so the stylesheet can give it a
             # more prominent look (rounded pill, slightly larger).
             self.setObjectName("Toast ToastCenter")
+            # Green check icon on the left.
+            self.icon.show()
+            # Center variant gets its own comfortable default if the
+            # caller didn't pass an explicit timeout.
+            if timeout_ms == self.DEFAULT_TIMEOUT_MS:
+                timeout_ms = self.CENTER_TIMEOUT_MS
         else:
             self.setObjectName("Toast")
+            self.icon.hide()
         # Re-polish to apply object-name style change.
         self.style().unpolish(self)
         self.style().polish(self)

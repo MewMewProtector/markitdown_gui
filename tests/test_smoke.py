@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.core import file_filter, naming  # noqa: E402
+from app.ui import toast_bar  # noqa: E402
 
 
 class TestFileFilter(unittest.TestCase):
@@ -317,6 +318,79 @@ class TestInlineImageCleanup(unittest.TestCase):
             # Without an API key we don't even try.
             self.assertNotIn("## Описания изображений", out)
             describe.assert_not_called()
+
+
+class TestToastCenterVariant(unittest.TestCase):
+    """
+    Pin the defaults for the centered "settings saved" toast so we don't
+    regress the 4s read time and the green-check icon.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # A QApplication must exist before instantiating any QWidget.
+        from PySide6.QtWidgets import QApplication
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_center_timeout_is_4_seconds(self) -> None:
+        self.assertEqual(toast_bar.ToastBar.CENTER_TIMEOUT_MS, 4000)
+
+    def test_default_timeout_is_shorter_than_center(self) -> None:
+        # Left/info toasts should not steal the spotlight from the
+        # center confirmation.
+        self.assertLess(
+            toast_bar.ToastBar.DEFAULT_TIMEOUT_MS,
+            toast_bar.ToastBar.CENTER_TIMEOUT_MS,
+        )
+
+    def test_center_timeout_overrides_default_when_unspecified(self) -> None:
+        # If the caller doesn't pass an explicit timeout and uses the
+        # center variant, show_message() must bump it to CENTER_TIMEOUT_MS.
+        captured: dict = {}
+
+        def fake_start(ms: int) -> None:
+            captured["ms"] = ms
+
+        toast = toast_bar.ToastBar()
+        try:
+            with mock.patch.object(
+                toast, "show_animated", lambda: None
+            ):
+                toast._hide_timer.start = fake_start  # type: ignore[assignment]
+                toast.show_message(
+                    "Настройки сохранены",
+                    variant=toast_bar.TOAST_VARIANT_CENTER,
+                    timeout_ms=toast_bar.ToastBar.DEFAULT_TIMEOUT_MS,
+                )
+            self.assertEqual(
+                captured.get("ms"),
+                toast_bar.ToastBar.CENTER_TIMEOUT_MS,
+            )
+        finally:
+            toast.deleteLater()
+
+    def test_explicit_timeout_respected(self) -> None:
+        captured: dict = {}
+
+        def fake_start(ms: int) -> None:
+            captured["ms"] = ms
+
+        toast = toast_bar.ToastBar()
+        try:
+            with mock.patch.object(
+                toast, "show_animated", lambda: None
+            ):
+                toast._hide_timer.start = fake_start  # type: ignore[assignment]
+                toast.show_message(
+                    "x",
+                    variant=toast_bar.TOAST_VARIANT_CENTER,
+                    timeout_ms=9999,
+                )
+            self.assertEqual(captured.get("ms"), 9999)
+        finally:
+            toast.deleteLater()
 
 
 if __name__ == "__main__":
