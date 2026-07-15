@@ -230,6 +230,15 @@ class SettingsView(QWidget):
 
         apil.addLayout(form)
 
+        # The "describe images" toggle sits ABOVE the plugin checkboxes so
+        # it's the first thing the user sees after the LLM endpoint fields.
+        # It is synced with the same widget in the pre-conversion dialog
+        # (see ScanView.confirm_conversion).
+        self.cb_describe_images = QCheckBox(
+            "Описывать картинки (LLM)", api
+        )
+        apil.addWidget(self.cb_describe_images)
+
         self.cb_plugins = QCheckBox("Использовать плагины", api)
         self.cb_docintel = QCheckBox("Включить Document Intelligence", api)
         self.cb_cu = QCheckBox("Включить Content Understanding", api)
@@ -350,6 +359,7 @@ class SettingsView(QWidget):
         self.cb_cu.setChecked(s.get("enable_cu") == "1")
         self.cb_audio.setChecked(s.get("enable_audio") == "1")
         self.cb_youtube.setChecked(s.get("enable_youtube") == "1")
+        self.cb_describe_images.setChecked(s.get("describe_images") == "1")
 
     def save(self) -> None:
         config.set_setting("watch_folder", self.edit_watch.text().strip())
@@ -374,6 +384,10 @@ class SettingsView(QWidget):
         config.set_setting("enable_cu", "1" if self.cb_cu.isChecked() else "0")
         config.set_setting("enable_audio", "1" if self.cb_audio.isChecked() else "0")
         config.set_setting("enable_youtube", "1" if self.cb_youtube.isChecked() else "0")
+        config.set_setting(
+            "describe_images",
+            "1" if self.cb_describe_images.isChecked() else "0",
+        )
 
     # ------------------------------------------------------------------
     def _on_theme_changed(self, index: int) -> None:

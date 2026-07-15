@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -77,6 +78,57 @@ class TestNaming(unittest.TestCase):
             (Path(tmp) / os.path.basename(out2)).write_text("third")
             self.assertEqual(os.path.basename(out1), "report_1.md")
             self.assertEqual(os.path.basename(out2), "report_2.md")
+
+
+class TestConverterDescribeImages(unittest.TestCase):
+    """
+    Smoke check that `Converter._build` passes (or omits) llm_model /
+    llm_prompt according to the `describe_images` setting.
+
+    We stub out `MarkItDown` so the test never depends on the optional
+    markitdown install in CI.
+    """
+
+    def _make(self, **overrides):
+        from app.core.converter import Converter
+
+        s = {
+            "describe_images": "0",
+            "llm_api_key": "sk-test",
+            "llm_base_url": "http://localhost/v1",
+            "llm_model": "gpt-4o-mini",
+            "llm_prompt": "",
+        }
+        s.update(overrides)
+        return Converter(s)
+
+    def test_describe_off_omits_llm_kwargs(self):
+        captured: dict = {}
+
+        def fake_mid(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        with mock.patch(
+            "app.core.converter.MarkItDown", side_effect=fake_mid
+        ):
+            self._make(describe_images="0").client()
+        self.assertNotIn("llm_model", captured)
+        self.assertNotIn("llm_prompt", captured)
+
+    def test_describe_on_adds_llm_model(self):
+        captured: dict = {}
+
+        def fake_mid(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        with mock.patch(
+            "app.core.converter.MarkItDown", side_effect=fake_mid
+        ):
+            self._make(describe_images="1", llm_prompt="Describe it").client()
+        self.assertEqual(captured.get("llm_model"), "gpt-4o-mini")
+        self.assertEqual(captured.get("llm_prompt"), "Describe it")
 
 
 if __name__ == "__main__":

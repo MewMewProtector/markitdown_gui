@@ -40,6 +40,18 @@ _MIGRATIONS: list[str] = [
     );
     INSERT OR IGNORE INTO schema_version VALUES (1);
     """,
+    # v2 — image-description cache
+    """
+    CREATE TABLE IF NOT EXISTS image_descriptions (
+        hash        TEXT NOT NULL,
+        model       TEXT NOT NULL,
+        prompt      TEXT NOT NULL,
+        description TEXT,
+        created_at  TEXT,
+        PRIMARY KEY (hash, model, prompt)
+    );
+    INSERT OR IGNORE INTO schema_version VALUES (2);
+    """,
 ]
 
 _CURRENT_VERSION = len(_MIGRATIONS)
@@ -105,6 +117,7 @@ _DEFAULTS: dict[str, str] = {
     "enable_cu": "0",
     "enable_audio": "0",
     "enable_youtube": "0",
+    "describe_images": "0",
 }
 
 
@@ -206,3 +219,47 @@ def close_db() -> None:
     if _conn is not None:
         _conn.close()
         _conn = None
+
+
+# ---------------------------------------------------------------------------
+# Image-description cache helpers (v2)
+# ---------------------------------------------------------------------------
+
+
+def get_cached_description(hash_key: str, model: str, prompt: str) -> str | None:
+    """Return a previously cached description for (hash, model, prompt), or None."""
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT description FROM image_descriptions "
+            "WHERE hash=? AND model=? AND prompt=?",
+            (hash_key, model or "", prompt or ""),
+        ).fetchone()
+    except Exception:
+        # Corrupted cache → behave as a miss.
+        return None
+    if not row:
+        return None
+    desc = row["description"]
+    return desc if desc else None
+
+
+def store_description(
+    hash_key: str,
+    model: str,
+    prompt: str,
+    description: str,
+    created_at: str,
+) -> None:
+    """Persist a description into the cache. Errors are swallowed."""
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO image_descriptions "
+            "(hash, model, prompt, description, created_at) VALUES (?, ?, ?, ?, ?)",
+            (hash_key, model or "", prompt or "", description or "", created_at),
+        )
+        db.commit()
+    except Exception:
+        # Best-effort cache write; never raise to the caller.
+        pass

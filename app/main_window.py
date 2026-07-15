@@ -296,7 +296,18 @@ class MainWindow(QMainWindow):
     # Conversion
     # ------------------------------------------------------------------
     def _start_conversions(self, paths: list[str]) -> None:
+        # Refresh settings (the pre-conversion dialog may have just toggled
+        # `describe_images`, and we also want to pick up the latest LLM
+        # endpoint fields).
         self._settings = config.get_all_settings()
+
+        # If the batch contains at least one image, ask the user whether
+        # the LLM should describe it. The dialog updates the global flag
+        # directly, so reading settings again here would be a no-op — but
+        # we still refresh above for the other LLM fields.
+        if not self.scan_view.confirm_conversion(paths):
+            return
+
         output_folder = self._settings.get("output_folder", "").strip() or None
 
         for path in paths:

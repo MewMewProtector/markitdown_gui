@@ -14,6 +14,9 @@ from typing import Iterable
 from PySide6.QtCore import QModelIndex, Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -32,6 +35,7 @@ from ..core.file_filter import (
     is_supported,
 )
 from ..core.file_filter import is_http_url  # re-exported below
+from ..core import config
 
 
 class ScanView(QWidget):
@@ -247,6 +251,74 @@ class ScanView(QWidget):
         self.convert_requested.emit(paths)
 
     # ------------------------------------------------------------------
+    # Pre-conversion confirmation
+    # ------------------------------------------------------------------
+    def confirm_conversion(self, paths: list[str]) -> bool:
+        """
+        If any path is an image, open a small dialog asking whether the LLM
+        should be invoked to describe it. The checkbox in the dialog is
+        synced with the global `describe_images` setting: toggling here
+        writes back to the same row the Settings tab reads from.
+
+        Returns True if the caller should proceed, False if the user picked
+        «Отмена». When no image is present in the batch, the dialog is
+        skipped entirely and True is returned.
+        """
+        if not any(_is_l1_image(p) for p in paths):
+            return True
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Описание картинок")
+        dlg.setModal(True)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        label = QLabel(
+            "Найдены изображения. Описать их через LLM?", dlg
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        cb = QCheckBox("Описывать картинки (LLM)", dlg)
+        cb.setChecked(config.get_setting("describe_images") == "1")
+        cb.toggled.connect(lambda checked: config.set_setting(
+            "describe_images", "1" if checked else "0"
+        ))
+        layout.addWidget(cb)
+
+        # Defensive hint: no API key set → warn the user that descriptions
+        # won't be generated even if the box is checked.
+        if cb.isChecked() and not config.get_setting("llm_api_key"):
+            hint = QLabel(
+                "Внимание: API-ключ LLM не задан — описания не будут добавлены.",
+                dlg,
+            )
+            hint.setObjectName("Muted")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=dlg,
+        )
+        # Russian labels on the action buttons.
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("Конвертировать")
+        cancel_btn = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn is not None:
+            cancel_btn.setText("Отмена")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        return accepted
+
+    # ------------------------------------------------------------------
     # Empty-state hint overlay
     # ------------------------------------------------------------------
     def _update_empty_hint(self, *_args) -> None:
@@ -305,3 +377,10 @@ def _supported_ext_set() -> set[str]:
     # Local import to avoid a hard dependency on file_filter for callers.
     from ..core.file_filter import SUPPORTED_EXTS
     return SUPPORTED_EXTS
+
+
+def _is_l1_image(path: str) -> bool:
+    """True for the L1 image extensions covered by this iteration."""
+    if not path or path.lower().startswith(("http://", "https://")):
+        return False
+    return extension_of(path) in {"jpg", "jpeg", "png"}

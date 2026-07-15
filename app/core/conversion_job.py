@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from . import config, naming
 from .converter import Converter
+from .image_descriptor import describe_image_via_cache, is_image_file
 
 
 class ConversionSignals(QObject):
@@ -59,8 +60,18 @@ class ConversionJob(QRunnable):
 
             self.signals.progress.emit(self.job_id, self.source_path, 25)
 
-            converter = Converter(self.settings)
-            markdown = converter.convert(self.source_path)
+            try:
+                converter = Converter(self.settings)
+                markdown = converter.convert(self.source_path)
+            except Exception as exc:
+                # Per-image fault tolerance: if markitdown blows up on a
+                # single image (LLM timeout, bad bytes, unsupported
+                # variant), write the EXIF fallback / placeholder file
+                # instead of failing the whole batch.
+                if is_image_file(self.source_path):
+                    markdown = self._image_fallback_markdown(exc)
+                else:
+                    raise
 
             self.signals.progress.emit(self.job_id, self.source_path, 80)
 
@@ -75,6 +86,28 @@ class ConversionJob(QRunnable):
                 self.source_path,
                 f"{exc}\n{traceback.format_exc()}",
             )
+
+    # ------------------------------------------------------------------
+    def _image_fallback_markdown(self, exc: Exception) -> str:
+        """
+        Build a minimal markdown file for an image that couldn't be
+        processed. Tries to fetch a cached description first (so the user
+        still gets something useful when the LLM is the failing piece);
+        otherwise writes the placeholder.
+        """
+        description = describe_image_via_cache(self.source_path, self.settings)
+        parts = [
+            f"<!-- markitdown_gui: image conversion failed: {exc} -->",
+            f"![{os.path.basename(self.source_path)}]({self.source_path})",
+            "",
+            "# Description:",
+            "",
+        ]
+        if description:
+            parts.append(description)
+        else:
+            parts.append("> [не удалось получить описание изображения]")
+        return "\n".join(parts) + "\n"
 
 
 def now_iso() -> str:

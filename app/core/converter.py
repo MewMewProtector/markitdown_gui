@@ -20,6 +20,7 @@ else:
     _IMPORT_ERROR = None
 
 from .file_filter import is_http_url
+from .image_descriptor import DEFAULT_MODEL, DEFAULT_PROMPT
 
 
 def is_available() -> bool:
@@ -67,6 +68,16 @@ class Converter:
         # LLM (OpenAI-compatible). Always pass when populated.
         if s.get("llm_api_key"):
             kwargs["llm_client"] = self._make_llm_client(s)
+
+        # When the user opts into image descriptions, also surface the model
+        # and prompt to markitdown so its ImageConverter appends a
+        # `# Description:` block for `.jpg` / `.jpeg` / `.png` inputs.
+        # PDF / DOCX / etc. are unaffected.
+        if s.get("describe_images") == "1":
+            kwargs["llm_model"] = (s.get("llm_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+            prompt = (s.get("llm_prompt") or DEFAULT_PROMPT).strip()
+            if prompt:
+                kwargs["llm_prompt"] = prompt
 
         return MarkItDown(**kwargs)
 
