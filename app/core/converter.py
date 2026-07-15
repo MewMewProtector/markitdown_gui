@@ -33,6 +33,7 @@ from .image_descriptor import (
     DEFAULT_MODEL,
     DEFAULT_PROMPT,
     describe_image_via_cache,
+    describe_image_with_error,
     is_image_file,
 )
 
@@ -61,6 +62,9 @@ class Converter:
     def __init__(self, settings: dict[str, str]):
         self._settings = dict(settings)
         self._client: Any | None = None
+        # Errors collected during the last `convert()` call. Cleared at
+        # the start of each call so callers always see the latest run.
+        self._last_errors: list[str] = []
 
     # ------------------------------------------------------------------
     # Internal
@@ -121,6 +125,9 @@ class Converter:
         return self._client
 
     def convert(self, path: str) -> str:
+        # Reset the per-call diagnostics buffer.
+        self._last_errors = []
+
         # URLs are handled by markitdown directly — no inline-image
         # extraction makes sense for remote URLs.
         if is_http_url(path):
@@ -137,7 +144,11 @@ class Converter:
                 try:
                     markdown = extract_markdown(path)
                     if self._should_describe_inline(ext):
-                        markdown += self._describe_inline_pdf(path)
+                        inline_block, errors = self._describe_inline_pdf(path)
+                        if inline_block:
+                            markdown += "\n\n" + inline_block
+                        if errors:
+                            self._last_errors.extend(errors)
                     return markdown
                 except Exception:
                     # Fall back to markitdown if smart extraction fails.
@@ -149,11 +160,22 @@ class Converter:
         markdown = getattr(result, "text_content", "") or ""
 
         if self._should_describe_inline(ext):
-            inline_block = self._describe_inline_office(path, ext)
+            inline_block, errors = self._describe_inline_office(path, ext)
             if inline_block:
                 markdown += "\n\n" + inline_block
+            if errors:
+                self._last_errors.extend(errors)
 
         return markdown
+
+    @property
+    def last_description_errors(self) -> list[str]:
+        """
+        List of human-readable error strings collected during the most
+        recent `convert()` call. Empty list when everything succeeded or
+        when descriptions were skipped. Useful for surfacing in the UI.
+        """
+        return list(self._last_errors)
 
     # ------------------------------------------------------------------
     # Inline-image description (L2/L3)
@@ -168,22 +190,22 @@ class Converter:
             return False
         return True
 
-    def _describe_inline_pdf(self, path: str) -> str:
+    def _describe_inline_pdf(self, path: str) -> tuple[str, list[str]]:
         """
         Extract every embedded image from the PDF, describe each one, and
-        return a markdown section grouped by page. The temp directory
-        holding the extracted PNGs is removed before returning.
+        return `(markdown_section, errors)`. The temp directory holding
+        the extracted PNGs is removed before returning.
         """
         from .pdf_image_extractor import extract_pdf_images, is_available
 
         if not is_available():
-            return ""
+            return "", []
         tmp = tempfile.mkdtemp(prefix="markitdown_gui_pdf_imgs_")
         try:
             try:
                 images = extract_pdf_images(path, tmp)
-            except Exception:
-                return ""
+            except Exception as exc:
+                return "", [f"не удалось извлечь изображения из PDF: {exc}"]
             return self._build_inline_markdown(
                 ((img.page_number, img.file_path) for img in images),
                 group_by_page=True,
@@ -194,11 +216,13 @@ class Converter:
             # touched.
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def _describe_inline_office(self, path: str, ext: str) -> str:
+    def _describe_inline_office(
+        self, path: str, ext: str
+    ) -> tuple[str, list[str]]:
         """
         Extract every embedded image from a DOCX/PPTX/XLSX, describe each
-        one, and return a markdown section. The temp directory is removed
-        before returning.
+        one, and return `(markdown_section, errors)`. The temp directory
+        is removed before returning.
         """
         from .office_image_extractor import (
             extract_office_images,
@@ -206,13 +230,15 @@ class Converter:
         )
 
         if not is_office_ext(ext):
-            return ""
+            return "", []
         tmp = tempfile.mkdtemp(prefix="markitdown_gui_office_imgs_")
         try:
             try:
                 images = extract_office_images(path, tmp)
-            except Exception:
-                return ""
+            except Exception as exc:
+                return "", [
+                    f"не удалось извлечь изображения из {ext}: {exc}"
+                ]
             # Office formats don't carry page metadata in the same way,
             # so we just list everything in source order.
             return self._build_inline_markdown(
@@ -229,7 +255,7 @@ class Converter:
         *,
         group_by_page: bool,
         archive_basename: str = "",
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         """
         Describe each image via the cache-backed helper and assemble a
         markdown section.
@@ -238,19 +264,23 @@ class Converter:
         `group_by_page` is True (PDF case), descriptions are grouped under
         `## Page N` headings; otherwise they live in a flat list under a
         single section.
+
+        Returns `(markdown_section, errors)` where `errors` carries
+        diagnostic strings for the failures (one per failed image, with
+        the underlying reason).
         """
         section: List[str] = []
         current_page: int | None = None
         described = 0
         failed = 0
         total = 0
+        errors: List[str] = []
 
         for page_num, file_path in items:
             total += 1
-            try:
-                description = describe_image_via_cache(file_path, self._settings)
-            except Exception:
-                description = None
+            description, err = describe_image_with_error(
+                file_path, self._settings
+            )
 
             if group_by_page and page_num != current_page:
                 section.append(f"## Page {page_num}")
@@ -269,10 +299,15 @@ class Converter:
                     "> [не удалось получить описание изображения]"
                 )
                 failed += 1
+                if err:
+                    where = (
+                        f"стр. {page_num}" if group_by_page else file_path
+                    )
+                    errors.append(f"{where}: {err}")
             section.append("")
 
         if not total:
-            return ""
+            return "", errors
 
         header = "## Описания изображений"
         if archive_basename:
@@ -285,7 +320,7 @@ class Converter:
             section.append(
                 f"*Описано: {described}, не удалось: {failed}, всего: {total}.*"
             )
-        return "\n".join(section).rstrip() + "\n"
+        return "\n".join(section).rstrip() + "\n", errors
 
 
 __all__ = ["Converter", "is_available", "import_error", "is_image_file"]

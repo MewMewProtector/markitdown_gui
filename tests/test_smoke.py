@@ -185,8 +185,8 @@ class TestInlineImageCleanup(unittest.TestCase):
             fake_mid.convert.return_value = fake_result
             with mock.patch.object(converter, "_client", fake_mid), \
                  mock.patch(
-                     "app.core.converter.describe_image_via_cache",
-                     return_value="a yellow square",
+                     "app.core.converter.describe_image_with_error",
+                     return_value=("a yellow square", None),
                  ) as describe:
                 out = converter.convert(docx_path)
 
@@ -224,7 +224,7 @@ class TestInlineImageCleanup(unittest.TestCase):
             fake_mid.convert.return_value = fake_result
             with mock.patch.object(converter, "_client", fake_mid), \
                  mock.patch(
-                     "app.core.converter.describe_image_via_cache",
+                     "app.core.converter.describe_image_with_error",
                  ) as describe:
                 out = converter.convert(docx_path)
 
@@ -249,7 +249,7 @@ class TestInlineImageCleanup(unittest.TestCase):
             fake_mid.convert.return_value = fake_result
             with mock.patch.object(converter, "_client", fake_mid), \
                  mock.patch(
-                     "app.core.converter.describe_image_via_cache",
+                     "app.core.converter.describe_image_with_error",
                  ) as describe:
                 out = converter.convert(docx_path)
 

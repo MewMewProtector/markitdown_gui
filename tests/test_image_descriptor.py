@@ -157,6 +157,81 @@ class TestImageDescriptor(unittest.TestCase):
         self.assertFalse(desc.is_image_file("doc.pdf"))
         self.assertFalse(desc.is_image_file("https://example.com/x.jpg"))
 
+    def test_describe_with_error_returns_reason_on_missing_key(self) -> None:
+        path = _write_tmp_image(".jpg")
+        settings = {
+            "llm_api_key": "",
+            "llm_base_url": "",
+            "llm_model": "gpt-4o-mini",
+            "llm_prompt": "",
+        }
+        description, err = desc.describe_image_with_error(path, settings)
+        self.assertIsNone(description)
+        self.assertIsNotNone(err)
+        self.assertIn("API", err or "")
+
+    def test_describe_with_error_returns_http_status_on_api_error(self) -> None:
+        path = _write_tmp_image(".jpg")
+        settings = {
+            "llm_api_key": "sk-fake",
+            "llm_base_url": "http://example.invalid/v1",
+            "llm_model": "gpt-4o-mini",
+            "llm_prompt": "",
+        }
+
+        class FakeApiError(Exception):
+            status_code = 401
+            message = "Invalid API key"
+
+        fake_client = mock.MagicMock()
+        fake_client.chat.completions.create.side_effect = FakeApiError(
+            "401 Unauthorized"
+        )
+        with mock.patch.object(
+            desc, "_make_openai_client", return_value=fake_client
+        ):
+            description, err = desc.describe_image_with_error(path, settings)
+        self.assertIsNone(description)
+        self.assertIn("401", err or "")
+        self.assertIn("Invalid API key", err or "")
+
+    def test_openrouter_detection(self) -> None:
+        self.assertTrue(desc._is_openrouter("https://openrouter.ai/api/v1"))
+        self.assertTrue(desc._is_openrouter("HTTPS://OPENROUTER.AI/api/v1"))
+        self.assertFalse(desc._is_openrouter("https://api.openai.com/v1"))
+        self.assertFalse(desc._is_openrouter(None))
+        self.assertFalse(desc._is_openrouter(""))
+
+    def test_openrouter_attaches_required_headers(self) -> None:
+        fake_client = mock.MagicMock()
+        fake_client.default_headers = {}
+        # The function imports `from openai import OpenAI` locally; patch
+        # the symbol on the openai module so the import resolves to our
+        # fake.
+        import openai  # noqa: F401  (import for patching)
+        with mock.patch("openai.OpenAI", return_value=fake_client, create=True):
+            client = desc._make_openai_client({
+                "llm_api_key": "sk-fake",
+                "llm_base_url": "https://openrouter.ai/api/v1",
+                "llm_model": "google/gemini-2.0-flash-exp:free",
+            })
+        self.assertIsNotNone(client)
+        self.assertIn("HTTP-Referer", client.default_headers)
+        self.assertIn("X-Title", client.default_headers)
+
+    def test_no_headers_for_other_providers(self) -> None:
+        fake_client = mock.MagicMock()
+        fake_client.default_headers = {}
+        import openai  # noqa: F401
+        with mock.patch("openai.OpenAI", return_value=fake_client, create=True):
+            client = desc._make_openai_client({
+                "llm_api_key": "sk-fake",
+                "llm_base_url": "https://api.openai.com/v1",
+                "llm_model": "gpt-4o-mini",
+            })
+        self.assertIsNotNone(client)
+        self.assertNotIn("HTTP-Referer", client.default_headers)
+
 
 class TestConverterBuild(unittest.TestCase):
     """Verify that Converter._build adds llm_model / llm_prompt as required."""

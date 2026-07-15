@@ -12,7 +12,11 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from . import config, naming
 from .converter import Converter
-from .image_descriptor import describe_image_via_cache, is_image_file
+from .image_descriptor import (
+    describe_image_via_cache,
+    describe_image_with_error,
+    is_image_file,
+)
 
 
 class ConversionSignals(QObject):
@@ -22,6 +26,10 @@ class ConversionSignals(QObject):
     finished = Signal(int, str, str)     # job_id, source_path, output_path
     failed = Signal(int, str, str)       # job_id, source_path, error
     progress = Signal(int, str, int)     # job_id, source_path, percent (0..100)
+    # Non-fatal warning emitted after a successful conversion but with
+    # image-description failures. MainWindow appends this to the log row
+    # so the user can see WHY images weren't described.
+    warning = Signal(int, str, str)      # job_id, source_path, warning_text
 
 
 class ConversionJob(QRunnable):
@@ -72,6 +80,24 @@ class ConversionJob(QRunnable):
                     markdown = self._image_fallback_markdown(exc)
                 else:
                     raise
+
+            # Surface image-description diagnostics so the user can see
+            # WHY a description didn't happen (e.g. bad API key, wrong
+            # model name, rate limit).
+            desc_errors = []
+            try:
+                desc_errors = converter.last_description_errors or []
+            except Exception:
+                pass
+            if desc_errors:
+                # Emit a warning so the main window can record it on the
+                # log row and optionally toast the first line.
+                warning_text = "; ".join(desc_errors[:5])
+                if len(desc_errors) > 5:
+                    warning_text += f" (и ещё {len(desc_errors) - 5})"
+                self.signals.warning.emit(
+                    self.job_id, self.source_path, warning_text
+                )
 
             self.signals.progress.emit(self.job_id, self.source_path, 80)
 

@@ -95,8 +95,18 @@ def get_cached(path: str, settings: Mapping[str, str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _is_openrouter(base_url: str | None) -> bool:
+    """True when the configured base URL points at OpenRouter."""
+    return bool(base_url) and "openrouter.ai" in base_url.lower()
+
+
 def _make_openai_client(settings: Mapping[str, str]) -> Any:
-    """Create an OpenAI-compatible client mirroring `Converter._make_llm_client`."""
+    """Create an OpenAI-compatible client mirroring `Converter._make_llm_client`.
+
+    When the base URL is an OpenRouter endpoint, we attach the
+    `HTTP-Referer` and `X-Title` headers that OpenRouter requires for
+    free-tier models (otherwise the request is rejected with 401/403).
+    """
     try:
         from openai import OpenAI  # type: ignore
     except Exception:
@@ -106,9 +116,21 @@ def _make_openai_client(settings: Mapping[str, str]) -> Any:
         return None
     base_url = settings.get("llm_base_url") or None
     try:
-        return OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
     except Exception:
         return None
+    # OpenRouter identifies the calling app via these headers. Setting them
+    # is harmless when pointing at other providers (the SDK forwards all
+    # `default_headers` as request headers).
+    if _is_openrouter(base_url):
+        try:
+            client.default_headers.update({
+                "HTTP-Referer": "https://github.com/markitdown-gui",
+                "X-Title": "markitdown_gui",
+            })
+        except Exception:
+            pass
+    return client
 
 
 def _call_llm(
@@ -142,6 +164,46 @@ def _call_llm(
         return None
 
 
+def _call_llm_with_error(
+    client: Any,
+    model: str,
+    prompt: str,
+    data_uri: str,
+    timeout: float = 60.0,
+) -> tuple[str | None, str | None]:
+    """Like `_call_llm` but also returns a short error string on failure."""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ],
+            timeout=timeout,
+        )
+    except Exception as exc:
+        # The openai SDK raises `APIStatusError` with `.status_code` and
+        # `.message`. Use them when available for a precise reason.
+        status = getattr(exc, "status_code", None)
+        msg = getattr(exc, "message", None) or str(exc)
+        if status is not None:
+            return None, f"HTTP {status}: {msg}"
+        return None, msg
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError, KeyError):
+        return None, "empty response (no choices)"
+    text = (content or "").strip() or None
+    if text is None:
+        return None, "empty response content"
+    return text, None
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -159,36 +221,73 @@ def describe_image_via_cache(
     Returns ``None`` if the file is missing, no API key is configured, the
     call fails, or the response is empty. Never raises — callers can treat
     ``None`` as "fall back to a placeholder block".
+
+    For diagnostic-friendly output use `describe_image_with_error` instead.
     """
+    description, _ = describe_image_with_error(
+        path, settings, force_refresh=force_refresh
+    )
+    return description
+
+
+def describe_image_with_error(
+    path: str,
+    settings: Mapping[str, str],
+    *,
+    force_refresh: bool = False,
+) -> tuple[str | None, str | None]:
+    """
+    Same as `describe_image_via_cache` but also returns a short reason
+    string on failure (empty/None on success). Use this from the converter
+    so the user can see WHY a description didn't happen.
+    """
+    if not path:
+        return None, "empty path"
     if not os.path.isfile(path):
-        return None
+        return None, f"file not found: {path}"
 
     model = _resolve_model(settings)
     prompt = _resolve_prompt(settings)
 
     try:
         hash_key = compute_hash(path)
-    except OSError:
-        return None
+    except OSError as exc:
+        return None, f"hash error: {exc}"
 
     if not force_refresh:
-        cached = config.get_cached_description(hash_key, model, prompt)
+        try:
+            cached = config.get_cached_description(hash_key, model, prompt)
+        except Exception as exc:
+            cached = None
+            cache_err: str | None = f"cache read error: {exc}"
+        else:
+            cache_err = None
         if cached:
-            return cached
+            return cached, None
 
     if not settings.get("llm_api_key"):
-        return None
+        return None, "API-ключ LLM не задан"
 
     client = _make_openai_client(settings)
     if client is None:
-        return None
+        return None, "не удалось создать OpenAI-клиент (проверьте зависимости)"
 
     try:
         data_uri = _data_uri(path)
-    except OSError:
-        return None
+    except OSError as exc:
+        return None, f"не удалось прочитать файл: {exc}"
 
-    description = _call_llm(client, model, prompt, data_uri)
+    description, err = _call_llm_with_error(client, model, prompt, data_uri)
     if description:
-        config.store_description(hash_key, model, prompt, description, _now_iso())
-    return description
+        try:
+            config.store_description(
+                hash_key, model, prompt, description, _now_iso()
+            )
+        except Exception:
+            pass
+        return description, None
+    # If we hit a cache error earlier but the LLM call also failed, surface
+    # the LLM error (it's the more useful one to the user).
+    if err is None:
+        err = cache_err or "неизвестная ошибка"
+    return None, err

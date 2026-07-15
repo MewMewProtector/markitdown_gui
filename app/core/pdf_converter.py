@@ -62,24 +62,38 @@ def _convert_page(page, page_index: int) -> str:
     blocks = page_dict.get("blocks", [])
     width = page.rect.width
 
-    # Flatten text blocks (skip image blocks).
+    # Build a set of bboxes occupied by detected tables so we can skip
+    # them in the body-text pass (otherwise their cells get rendered as
+    # garbled "loose words" — see the StrongSORT issue in the bug log).
+    table_bboxes = _collect_table_bboxes(page)
+
+    # Flatten text blocks (skip image blocks AND blocks inside a table).
     text_blocks: list[dict] = []
     for b in blocks:
         if b.get("type", 0) != 0:
+            continue
+        bbox = b.get("bbox")
+        if bbox and _bbox_inside_any(bbox, table_bboxes):
             continue
         spans = _collect_spans(b)
         if not spans:
             continue
         text_blocks.append({
-            "bbox": b.get("bbox"),
+            "bbox": bbox,
             "spans": spans,
             "block_no": b.get("number", 0),
         })
 
-    if not text_blocks:
+    body_size, body_line_height = _estimate_body_metrics(text_blocks)
+
+    # Render detected tables as proper markdown tables. We append them
+    # after the body text of the page so column-grouping doesn't
+    # interleave cells from different rows. Each table gets a label.
+    table_md = _render_tables(page, table_bboxes)
+
+    if not text_blocks and not table_md:
         return ""
 
-    body_size, body_line_height = _estimate_body_metrics(text_blocks)
     columns = _detect_columns(text_blocks, width)
 
     # Order: column by column, then top-to-bottom within each column.
@@ -95,6 +109,9 @@ def _convert_page(page, page_index: int) -> str:
         md = _block_to_markdown(blk, body_size, body_line_height)
         if md:
             lines.append(md)
+
+    if table_md:
+        lines.append(table_md)
 
     return "\n\n".join(lines)
 
@@ -421,3 +438,101 @@ def _fix_abstract_keywords(md: str) -> str:
             continue
         out.append(ln)
     return "\n".join(out)
+
+
+# ----------------------------------------------------------------------
+# Table detection (pymupdf `find_tables`, available since 1.23)
+# ----------------------------------------------------------------------
+def _collect_table_bboxes(page) -> list[tuple[float, float, float, float]]:
+    """
+    Return `(x0, y0, x1, y1)` for each table on the page, or [] if
+    detection isn't available / finds nothing.
+    """
+    try:
+        finder = page.find_tables()
+    except Exception:
+        return []
+    bboxes: list[tuple[float, float, float, float]] = []
+    try:
+        tables = list(finder.tables)
+    except Exception:
+        return []
+    for t in tables:
+        try:
+            b = t.bbox  # (x0, y0, x1, y1)
+            bboxes.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+        except Exception:
+            continue
+    return bboxes
+
+
+def _bbox_inside_any(
+    bbox: tuple[float, float, float, float],
+    containers: list[tuple[float, float, float, float]],
+) -> bool:
+    """True if `bbox` is contained in any of the `containers`."""
+    x0, y0, x1, y1 = bbox
+    for cx0, cy0, cx1, cy1 in containers:
+        if x0 >= cx0 and y0 >= cy0 and x1 <= cx1 and y1 <= cy1:
+            return True
+    return False
+
+
+def _render_tables(
+    page,
+    table_bboxes: list[tuple[float, float, float, float]],
+) -> str:
+    """
+    Convert each detected table to a markdown table.
+
+    Tables are rendered under a "## Таблица N" heading and appended
+    AFTER the page's body text — the layout-aware column grouping above
+    would otherwise shred their cells into unrelated paragraphs.
+    """
+    if not table_bboxes:
+        return ""
+    try:
+        finder = page.find_tables()
+        tables = list(finder.tables)
+    except Exception:
+        return ""
+
+    out: list[str] = []
+    for idx, t in enumerate(tables, start=1):
+        try:
+            # `extract()` returns a list-of-lists of cell strings.
+            rows = t.extract()
+        except Exception:
+            continue
+        if not rows:
+            continue
+        # Filter out fully-empty rows and collapse internal newlines.
+        cleaned: list[list[str]] = []
+        for row in rows:
+            cells = [
+                " ".join((cell or "").split())
+                for cell in row
+            ]
+            # Drop rows where every cell is empty.
+            if any(c for c in cells):
+                cleaned.append(cells)
+        if not cleaned:
+            continue
+        # Normalize column count to the widest row.
+        width = max(len(r) for r in cleaned)
+        for r in cleaned:
+            while len(r) < width:
+                r.append("")
+        # Escape pipes so the markdown table stays valid.
+        def _esc(s: str) -> str:
+            return s.replace("|", "\\|").strip()
+        header = cleaned[0]
+        body = cleaned[1:] if len(cleaned) > 1 else []
+        out.append(f"### Таблица {idx}")
+        out.append("")
+        out.append("| " + " | ".join(_esc(c) for c in header) + " |")
+        out.append("|" + "|".join("---" for _ in header) + "|")
+        for row in body:
+            out.append("| " + " | ".join(_esc(c) for c in row) + " |")
+        out.append("")
+    return "\n".join(out).rstrip()

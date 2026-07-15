@@ -332,6 +332,7 @@ class MainWindow(QMainWindow):
             job.signals.progress.connect(self._on_job_progress)
             job.signals.finished.connect(self._on_job_finished)
             job.signals.failed.connect(self._on_job_failed)
+            job.signals.warning.connect(self._on_job_warning)
             self._active_jobs[job_id] = job
 
             try:
@@ -355,8 +356,11 @@ class MainWindow(QMainWindow):
         job = self._active_jobs.pop(job_id, None)
         if job is not None:
             row_id = getattr(job, "_log_row_id", -1)
+            warning_text = getattr(job, "_warning_text", "") or ""
             if row_id and row_id > 0:
-                config.log_finish(row_id, output_path, self._now_iso(), "ok", "")
+                config.log_finish(
+                    row_id, output_path, self._now_iso(), "ok", warning_text
+                )
         # Load into preview tab.
         self.preview_view.load_file(output_path)
         self.tabs.setCurrentIndex(1)
@@ -364,6 +368,25 @@ class MainWindow(QMainWindow):
         config.set_setting("last_preview", output_path)
         # Refresh log in case it is already opened.
         self.log_view.refresh()
+
+    def _on_job_warning(self, job_id: int, source_path: str, warning_text: str) -> None:
+        """
+        Non-fatal warning from a successful conversion — currently used to
+        surface image-description failures. We stash the warning on the
+        job so the final `_on_job_finished` can prepend it to the log
+        row's error field, then toast the first line so the user notices.
+        """
+        job = self._active_jobs.get(job_id)
+        if job is not None:
+            # Stash for `_on_job_finished` to pick up.
+            existing = getattr(job, "_warning_text", "") or ""
+            if existing:
+                warning_text = f"{existing}; {warning_text}"
+            job._warning_text = warning_text  # type: ignore[attr-defined]
+        first_line = warning_text.split(";")[0].strip()
+        self._show_toast(
+            f"Описания картинок: {first_line}", "error", 6000
+        )
 
     def _on_job_failed(self, job_id: int, source_path: str, error: str) -> None:
         self.scan_view.update_status(source_path, "ошибка")
