@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "markitdown-gui"
+version = "0.0.1"
+description = "Desktop GUI for Microsoft's MarkItDown converter"
+requires-python = ">=3.10"
+dependencies = [
+    "markitdown[all]==0.1.6",
+    "PySide6>=6.7.0,<7",
+    "pymupdf>=1.24.0",
+]
+
+[project.scripts]
+markitdown-gui = "app.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

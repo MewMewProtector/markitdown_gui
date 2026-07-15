@@ -1,0 +1,15 @@
+_*
+*.xml
+*.xlsx
+*.csv
+# Build artifacts
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.kilo
