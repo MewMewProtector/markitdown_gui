@@ -304,18 +304,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Conversion
     # ------------------------------------------------------------------
-    def _start_conversions(self, paths: list[str]) -> None:
+    def _start_conversions(self, paths: list[str], from_streaming: bool = False) -> None:
         # Refresh settings (the pre-conversion dialog may have just toggled
         # `describe_images`, and we also want to pick up the latest LLM
         # endpoint fields).
         self._settings = config.get_all_settings()
 
-        # If the batch contains at least one image, ask the user whether
-        # the LLM should describe it. The dialog updates the global flag
-        # directly, so reading settings again here would be a no-op — but
-        # we still refresh above for the other LLM fields.
-        if not self.scan_view.confirm_conversion(paths):
-            return
+        # Streaming mode auto-converts without any user prompt — skip
+        # the pre-conversion dialog entirely.
+        if not from_streaming:
+            # If the batch contains at least one image, ask the user
+            # whether the LLM should describe it. The dialog updates the
+            # global flag directly, so reading settings again here would
+            # be a no-op — but we still refresh above for the other LLM
+            # fields.
+            if not self.scan_view.confirm_conversion(paths):
+                return
 
         output_folder = self._settings.get("output_folder", "").strip() or None
 
@@ -341,7 +345,8 @@ class MainWindow(QMainWindow):
                 row_id = -1
             job._log_row_id = row_id  # type: ignore[attr-defined]
 
-            self.scan_view.update_status(path, "в работе…")
+            if not from_streaming:
+                self.scan_view.update_status(path, "в работе…")
             QThreadPool.globalInstance().start(job)
 
     def _on_job_started(self, job_id: int, source_path: str) -> None:
@@ -404,6 +409,22 @@ class MainWindow(QMainWindow):
     # Watcher → UI
     # ------------------------------------------------------------------
     def _on_new_files(self, paths: list[str]) -> None:
+        # Streaming mode: every newly observed file is auto-converted
+        # without waiting for user input. The describe_images flag still
+        # applies, so PDF/DOCX/PPTX/XLSX get inline-image LLM
+        # descriptions when both toggles are on. Output lands in
+        # output_folder (or next to the source if it's empty).
+        if config.get_setting("streaming_mode") == "1":
+            self._start_conversions(list(paths), from_streaming=True)
+            if paths:
+                self._show_toast(
+                    f"Стриминг: конвертирую {len(paths)} файл(ов)…",
+                    "info",
+                    2500,
+                )
+            return
+
+        # Default behaviour: just queue them in the Files tab.
         added = self.scan_view.add_paths(paths, mark_as_new=True)
         if added:
             self._show_toast(

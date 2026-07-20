@@ -126,6 +126,38 @@ class SettingsView(QWidget):
             lambda: self._pick_into(self.edit_output, "Выберите папку сохранения")
         )
 
+        # Streaming mode toggle lives in the Folders section because it
+        # governs what happens to NEW files arriving in the watched
+        # folder. When enabled, every supported file dropped into the
+        # watched folder is auto-converted to .md and placed into the
+        # output folder (or next to the source if output_folder is empty).
+        # The describe_images toggle governs LLM descriptions per-file as
+        # usual, so PDFs / DOCX still get inline-image descriptions when
+        # both toggles are on.
+        self.cb_streaming_mode = QCheckBox(
+            "Стриминг: автоматически конвертировать новые файлы в .md", folders
+        )
+        self.cb_streaming_mode.setToolTip(
+            "При включении этого режима любой поддерживаемый файл, "
+            "появившийся в папке сканирования, сразу конвертируется в .md "
+            "и переносится в папку сохранения. Если включено "
+            "«Описывать картинки (LLM)», картинки в файлах также "
+            "описываются."
+        )
+        fl.addWidget(self.cb_streaming_mode)
+
+        # Defensive hint when streaming is enabled but no output folder is
+        # chosen: the converted .md files will land next to the source.
+        self._streaming_hint = QLabel(
+            "Папка сохранения не выбрана - .md файлы будут создаваться "
+            "рядом с исходниками.",
+            folders,
+        )
+        self._streaming_hint.setObjectName("Muted")
+        self._streaming_hint.setWordWrap(True)
+        self._streaming_hint.hide()
+        fl.addWidget(self._streaming_hint)
+
         root.addWidget(folders)
 
         # --------------------------------------------------------------
@@ -272,6 +304,10 @@ class SettingsView(QWidget):
         self.edit_light_hex.textChanged.connect(self._on_hex_typed)
         self.edit_dark_hex.textChanged.connect(self._on_hex_typed)
 
+        # Streaming hint reacts live to either the toggle or the output path.
+        self.cb_streaming_mode.toggled.connect(self._update_streaming_hint)
+        self.edit_output.textChanged.connect(self._update_streaming_hint)
+
         # Ctrl+S saves settings regardless of which sub-widget has focus.
         self._save_shortcut = QShortcut(
             QKeySequence.StandardKey.Save, self
@@ -337,6 +373,8 @@ class SettingsView(QWidget):
         s = config.get_all_settings()
         self.edit_watch.setText(s.get("watch_folder", ""))
         self.edit_output.setText(s.get("output_folder", ""))
+        self.cb_streaming_mode.setChecked(s.get("streaming_mode") == "1")
+        self._update_streaming_hint()
 
         theme = s.get("theme", "system")
         idx = {"light": 0, "dark": 1, "system": 2}.get(theme, 2)
@@ -398,9 +436,28 @@ class SettingsView(QWidget):
             "describe_images",
             "1" if self.cb_describe_images.isChecked() else "0",
         )
+        config.set_setting(
+            "streaming_mode",
+            "1" if self.cb_streaming_mode.isChecked() else "0",
+        )
 
         # Notify listeners (MainWindow) that persistence actually finished.
         self.settings_saved.emit()
+
+    # ------------------------------------------------------------------
+    def _update_streaming_hint(self) -> None:
+        """
+        Show the "no output folder selected" hint when streaming mode is
+        enabled and the user hasn't picked an output folder - the .md
+        files will be created next to each source.
+        """
+        if not hasattr(self, "_streaming_hint"):
+            return
+        show = (
+            self.cb_streaming_mode.isChecked()
+            and not self.edit_output.text().strip()
+        )
+        self._streaming_hint.setVisible(show)
 
     # ------------------------------------------------------------------
     def _on_theme_changed(self, index: int) -> None:

@@ -118,6 +118,7 @@ _DEFAULTS: dict[str, str] = {
     "enable_audio": "0",
     "enable_youtube": "0",
     "describe_images": "0",
+    "streaming_mode": "0",
 }
 
 
