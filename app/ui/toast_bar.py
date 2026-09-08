@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QParallelAnimationGroup,
     QPropertyAnimation,
     QRectF,
     QSize,
@@ -18,7 +19,13 @@ from PySide6.QtCore import (
     Qt,
 )
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QWidget,
+)
 
 
 # Visual variants — `center` is used for prominent confirmations
@@ -72,18 +79,23 @@ class _CheckIcon(QWidget):
 
 
 class ToastBar(QFrame):
-    """Slide-down notification banner shown at the top of the main window."""
+    """Notification banner shown below the title bar and faded out gently."""
 
     DEFAULT_TIMEOUT_MS = 3500
     # Center variant ("settings saved") gets a longer, comfortable read
     # time so the user can actually see the confirmation.
     CENTER_TIMEOUT_MS = 4000
+    DEFAULT_TOP_OFFSET = 50
+    SHOW_DURATION_MS = 220
+    HIDE_DURATION_MS = 460
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Toast")
         self.setFixedHeight(44)
         self.hide()
+        self._top_offset = self.DEFAULT_TOP_OFFSET
+        self._animation_phase = "idle"
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 6, 16, 6)
@@ -96,9 +108,21 @@ class ToastBar(QFrame):
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.label, 1)
 
-        self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(220)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Position and opacity are animated together. A dedicated effect is
+        # used instead of changing the window opacity, which would affect the
+        # entire application rather than this notification only.
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
+
+        self._position_animation = QPropertyAnimation(self, b"pos", self)
+        self._opacity_animation = QPropertyAnimation(
+            self._opacity_effect, b"opacity", self
+        )
+        self._animation_group = QParallelAnimationGroup(self)
+        self._animation_group.addAnimation(self._position_animation)
+        self._animation_group.addAnimation(self._opacity_animation)
+        self._animation_group.finished.connect(self._on_animation_finished)
 
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -109,6 +133,12 @@ class ToastBar(QFrame):
         # backward compatibility with existing callers.
         self._variant = TOAST_VARIANT_LEFT
 
+    def set_top_offset(self, offset: int) -> None:
+        """Place the toast this many pixels below the parent widget's top."""
+        self._top_offset = max(0, int(offset))
+        if self.isVisible():
+            self.reposition()
+
     # ------------------------------------------------------------------
     def show_message(
         self,
@@ -117,14 +147,18 @@ class ToastBar(QFrame):
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         variant: str = TOAST_VARIANT_LEFT,
     ) -> None:
+        # A new message replaces the previous timeout and any in-progress
+        # fade, so a stale timer cannot hide the new notification early.
+        self._hide_timer.stop()
+        self._animation_group.stop()
         self._variant = variant
         if kind == "error":
-            self.setObjectName("Toast ToastError")
+            self.setObjectName("ToastError")
             self.icon.hide()
         elif variant == TOAST_VARIANT_CENTER:
             # Distinct object-name so the stylesheet can give it a
             # more prominent look (rounded pill, slightly larger).
-            self.setObjectName("Toast ToastCenter")
+            self.setObjectName("ToastCenter")
             # Green check icon on the left.
             self.icon.show()
             # Center variant gets its own comfortable default if the
@@ -145,45 +179,106 @@ class ToastBar(QFrame):
     def show_animated(self) -> None:
         parent = self.parentWidget()
         if parent is None:
+            self._opacity_effect.setOpacity(1.0)
             self.show()
             return
-        end_y = parent.contentsRect().top() + 6
-
-        if self._variant == TOAST_VARIANT_CENTER:
-            # A wider, horizontally centered pill near the top edge.
-            width = max(360, min(560, parent.contentsRect().width() - 64))
-            x = parent.contentsRect().left() + (
-                parent.contentsRect().width() - width
-            ) // 2
-        else:
-            width = max(280, min(640, parent.contentsRect().width() - 32))
-            x = parent.contentsRect().left() + 16
-
+        x, end_y, width = self._target_geometry()
         self.resize(width, self.height())
         start_pos = self.pos()
+        start_pos.setX(x)
+        start_pos.setY(end_y - 12)
         end_pos = self.pos()
         end_pos.setX(x)
         end_pos.setY(end_y)
-        self.move(start_pos.x(), end_pos.y() - self.height())
+        self.move(start_pos)
+        self._opacity_effect.setOpacity(0.0)
         self.show()
         self.raise_()
-        self._anim.stop()
-        self._anim.setStartValue(self.pos())
-        self._anim.setEndValue(end_pos)
-        self._anim.start()
+        self._animation_phase = "show"
+        self._configure_animation(
+            start_pos,
+            end_pos,
+            0.0,
+            1.0,
+            self.SHOW_DURATION_MS,
+            QEasingCurve.Type.OutCubic,
+        )
+        self._animation_group.start()
 
     def hide_animated(self) -> None:
         parent = self.parentWidget()
         if parent is None:
             self.hide()
             return
+        # ``isVisible()`` is also false when an ancestor is temporarily
+        # hidden (for example while the main window is being restored).
+        # Only skip when this toast itself was explicitly hidden.
+        if self.isHidden():
+            return
+        self._hide_timer.stop()
+        self._animation_group.stop()
+        start = self.pos()
         end = self.pos()
-        end.setY(end.y() - self.height())
-        self._anim.stop()
-        self._anim.setStartValue(self.pos())
-        self._anim.setEndValue(end)
-        self._anim.finished.connect(self.hide)
-        self._anim.start()
+        end.setY(end.y() - 8)
+        self._animation_phase = "hide"
+        self._configure_animation(
+            start,
+            end,
+            self._opacity_effect.opacity(),
+            0.0,
+            self.HIDE_DURATION_MS,
+            QEasingCurve.Type.InOutCubic,
+        )
+        self._animation_group.start()
+
+    def reposition(self) -> None:
+        """Keep a visible toast anchored correctly after a window resize."""
+        if self.parentWidget() is None:
+            return
+        x, y, width = self._target_geometry()
+        self.resize(width, self.height())
+        self.move(x, y)
+        self.raise_()
+
+    def _target_geometry(self) -> tuple[int, int, int]:
+        parent = self.parentWidget()
+        if parent is None:
+            return self.x(), self.y(), self.width()
+        rect = parent.contentsRect()
+        end_y = rect.top() + self._top_offset
+        if self._variant == TOAST_VARIANT_CENTER:
+            width = max(360, min(560, rect.width() - 64))
+            x = rect.left() + (rect.width() - width) // 2
+        else:
+            width = max(280, min(640, rect.width() - 32))
+            x = rect.left() + 16
+        return x, end_y, width
+
+    def _configure_animation(
+        self,
+        start_pos,
+        end_pos,
+        start_opacity: float,
+        end_opacity: float,
+        duration: int,
+        easing: QEasingCurve.Type,
+    ) -> None:
+        self._position_animation.setDuration(duration)
+        self._position_animation.setEasingCurve(easing)
+        self._position_animation.setStartValue(start_pos)
+        self._position_animation.setEndValue(end_pos)
+        self._opacity_animation.setDuration(duration)
+        self._opacity_animation.setEasingCurve(easing)
+        self._opacity_animation.setStartValue(start_opacity)
+        self._opacity_animation.setEndValue(end_opacity)
+
+    def _on_animation_finished(self) -> None:
+        if self._animation_phase == "hide":
+            self.hide()
+            # Reset for the next show; the widget is already hidden, so this
+            # cannot cause a flash.
+            self._opacity_effect.setOpacity(1.0)
+        self._animation_phase = "idle"
 
     def paintEvent(self, event):  # noqa: N802 - Qt API
         # Default Qt styling is fine; this only exists to avoid a QPainter

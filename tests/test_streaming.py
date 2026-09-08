@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from collections import deque
 from pathlib import Path
 from unittest import mock
 
@@ -59,10 +60,11 @@ class TestStreamingSetting(unittest.TestCase):
 
 class TestStreamingTriggersAutoConversion(unittest.TestCase):
     """
-    When the watcher emits `new_files` AND `streaming_mode == 1`,
-    MainWindow must kick off conversion jobs instead of just queueing
-    files in the Files tab. When the mode is off, the legacy behaviour
-    (just add to scan_view) is preserved.
+    When the watcher emits `new_files` AND streaming is currently
+    active (settings flag + valid paths), MainWindow must enqueue the
+    files into its FIFO instead of just dropping them into the Files
+    tab. When streaming is off (or the configuration is invalid), the
+    legacy behaviour is preserved.
     """
 
     def _build_main_window(self):
@@ -77,39 +79,49 @@ class TestStreamingTriggersAutoConversion(unittest.TestCase):
             "streaming_mode": "0",
             "llm_api_key": "",
             "output_folder": "",
+            "watch_folder": "",
         }
-        win._job_counter = 0
-        win._active_jobs = {}
+        win._streaming_active = False
+        win._streaming_in_flight = False
+        win._streaming_queue = deque()
+        win._streaming_settings = dict(win._settings)
+        timer = mock.MagicMock()
+        timer.isActive.return_value = False  # idle timer => start() is needed
+        win._readiness_timer = timer
         win._show_toast = mock.MagicMock()
         win.scan_view = mock.MagicMock()
-        # `_start_conversions` is the integration point we want to test.
-        win._start_conversions = mock.MagicMock()
+        win._active_jobs = {}
         return win
 
-    def test_streaming_on_calls_start_conversions(self) -> None:
-        from app.core import config
-
-        with mock.patch.object(config, "get_setting", return_value="1"):
-            win = self._build_main_window()
-            win._on_new_files(["/watched/a.pdf", "/watched/b.docx"])
-            win._start_conversions.assert_called_once()
-            args, kwargs = win._start_conversions.call_args
-            self.assertEqual(args[0], ["/watched/a.pdf", "/watched/b.docx"])
-            self.assertTrue(kwargs.get("from_streaming"))
-            win._show_toast.assert_called_once()
-            # scan_view must NOT be touched in streaming mode.
-            win.scan_view.add_paths.assert_not_called()
+    def test_streaming_on_enqueues_items(self) -> None:
+        win = self._build_main_window()
+        win._settings["streaming_mode"] = "1"
+        win._streaming_active = True
+        win._on_new_files(["/watched/a.pdf", "/watched/b.docx"])
+        # Each accepted path must have been queued exactly once.
+        queued = {item.path for item in win._streaming_queue}
+        self.assertEqual(
+            queued, {"/watched/a.pdf", "/watched/b.docx"}
+        )
+        self.assertTrue(win._readiness_timer.start.called or win._readiness_timer.start.call_count > 0)
+        win.scan_view.add_paths.assert_called()
 
     def test_streaming_off_uses_legacy_path(self) -> None:
-        from app.core import config
+        win = self._build_main_window()
+        win.scan_view.add_paths.return_value = 2
+        win._on_new_files(["/watched/a.pdf", "/watched/b.docx"])
+        self.assertEqual(len(win._streaming_queue), 0)
+        win.scan_view.add_paths.assert_called_once()
+        win._show_toast.assert_called_once()
 
-        with mock.patch.object(config, "get_setting", return_value="0"):
-            win = self._build_main_window()
-            win.scan_view.add_paths.return_value = 2
-            win._on_new_files(["/watched/a.pdf", "/watched/b.docx"])
-            win._start_conversions.assert_not_called()
-            win.scan_view.add_paths.assert_called_once()
-            win._show_toast.assert_called_once()
+    def test_streaming_invalid_uses_legacy_path(self) -> None:
+        win = self._build_main_window()
+        win._settings["streaming_mode"] = "1"  # toggle on in settings
+        win._streaming_active = False  # but invalid combo
+        win.scan_view.add_paths.return_value = 1
+        win._on_new_files(["/watched/a.pdf"])
+        self.assertEqual(len(win._streaming_queue), 0)
+        win.scan_view.add_paths.assert_called_once()
 
 
 class TestSettingsViewStreamingUI(unittest.TestCase):
@@ -162,8 +174,13 @@ class TestSettingsViewStreamingUI(unittest.TestCase):
         self.assertTrue(self.view.cb_streaming_mode.isChecked())
 
     def test_save_persists_state(self) -> None:
-        self.view.cb_streaming_mode.setChecked(True)
-        self.view.save()
+        # Provide an existing output folder so validation accepts
+        # streaming-mode being turned on.
+        with tempfile.TemporaryDirectory() as out:
+            self.view.edit_watch.setText(tempfile.mkdtemp(prefix="sw_"))
+            self.view.edit_output.setText(out)
+            self.view.cb_streaming_mode.setChecked(True)
+            self.view.save()
         self.assertEqual(self._config.get_setting("streaming_mode"), "1")
 
     def test_save_off_persists_zero(self) -> None:
@@ -171,17 +188,30 @@ class TestSettingsViewStreamingUI(unittest.TestCase):
         self.view.save()
         self.assertEqual(self._config.get_setting("streaming_mode"), "0")
 
-    def test_hint_visible_when_no_output_folder(self) -> None:
+    def test_invalid_streaming_does_not_persist(self) -> None:
+        # Streaming on but no output folder => validation rejects. The
+        # existing setting must be left untouched (no partial save).
+        self._config.set_setting("streaming_mode", "0")
+        saved: list[str] = []
+
+        def fake_set(key, value):
+            saved.append(f"{key}={value}")
+
+        with mock.patch.object(self._config, "set_setting", side_effect=fake_set):
+            self.view.cb_streaming_mode.setChecked(True)
+            self.view.edit_output.setText("")
+            self.view.save()
+        # `streaming_mode` MUST NOT have been written when validation fails.
+        self.assertNotIn("streaming_mode=1", saved)
+        self.assertEqual(self._config.get_setting("streaming_mode"), "0")
+
+    def test_hint_visible_when_streaming_on(self) -> None:
+        # The hint is now always shown when streaming is on - it
+        # explains the external-output-folder requirement.
         self.view.edit_output.setText("")
         self.view.cb_streaming_mode.setChecked(True)
         self.view._update_streaming_hint()
         self.assertTrue(self.view._streaming_hint.isVisible())
-
-    def test_hint_hidden_when_output_folder_set(self) -> None:
-        self.view.edit_output.setText("/some/output")
-        self.view.cb_streaming_mode.setChecked(True)
-        self.view._update_streaming_hint()
-        self.assertFalse(self.view._streaming_hint.isVisible())
 
     def test_hint_hidden_when_streaming_off(self) -> None:
         self.view.edit_output.setText("")

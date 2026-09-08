@@ -5,6 +5,8 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -12,12 +14,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from PySide6.QtGui import QColor
 
 from app.ui import theme  # noqa: E402
+from app.main_window import MainWindow  # noqa: E402
 
 
 def _button_bg_hex(palette, is_dark):
     if is_dark:
-        return theme._blend(palette.bg, palette.surface, 0.85)
-    return theme._blend(palette.bg, palette.surface, 0.55)
+        return theme._blend(palette.bg, palette.text, 0.12)
+    return theme._blend(palette.bg, palette.text, 0.08)
 
 
 def _is_dark_bg(palette) -> bool:
@@ -25,6 +28,17 @@ def _is_dark_bg(palette) -> bool:
 
 
 class TestTitleBarContrast(unittest.TestCase):
+    def test_startup_palette_uses_crisp_white_icons_in_dark_mode(self):
+        fake_window = SimpleNamespace(
+            _current_palette=theme.palette_for("dark"),
+            title_bar=mock.MagicMock(),
+        )
+        MainWindow._update_title_bar_palette(fake_window)
+        fake_window.title_bar.apply_icon_palette.assert_called_once_with(
+            text_color="#FFFFFF",
+            text_muted_color="#FFFFFF",
+        )
+
     def test_dark_title_button_bg_differs_from_titlebar_bg(self):
         p = theme.palette_for("dark")
         btn_bg = QColor(_button_bg_hex(p, _is_dark_bg(p)))

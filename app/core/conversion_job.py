@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import traceback
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
@@ -14,7 +14,6 @@ from . import config, naming
 from .converter import Converter
 from .image_descriptor import (
     describe_image_via_cache,
-    describe_image_with_error,
     is_image_file,
 )
 
@@ -40,12 +39,17 @@ class ConversionJob(QRunnable):
     rows in the files table.
     """
 
+    ORIGIN_MANUAL = "manual"
+    ORIGIN_STREAMING = "streaming"
+
     def __init__(
         self,
         job_id: int,
         source_path: str,
         output_folder: str,
         settings: dict[str, str],
+        origin: str = ORIGIN_MANUAL,
+        output_path: str | None = None,
     ):
         super().__init__()
         self.setAutoDelete(True)
@@ -53,17 +57,28 @@ class ConversionJob(QRunnable):
         self.source_path = source_path
         self.output_folder = output_folder
         self.settings = settings
+        self.origin = origin
+        self.output_path = output_path
         self.signals = ConversionSignals()
 
     # ------------------------------------------------------------------
     @Slot()
     def run(self) -> None:
         started_at = datetime.utcnow().isoformat(timespec="seconds")
+        converter: Converter | None = None
         try:
             self.signals.started.emit(self.job_id, self.source_path)
             self.signals.progress.emit(self.job_id, self.source_path, 5)
 
-            output_path = naming.build_output_path(self.source_path, self.output_folder)
+            # Caller may pre-reserve a unique output path (used by
+            # streaming to prevent collisions between concurrent jobs);
+            # otherwise compute one the classic way.
+            if self.output_path:
+                output_path = self.output_path
+            else:
+                output_path = naming.build_output_path(
+                    self.source_path, self.output_folder
+                )
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             self.signals.progress.emit(self.job_id, self.source_path, 25)
@@ -93,10 +108,11 @@ class ConversionJob(QRunnable):
             # WHY a description didn't happen (e.g. bad API key, wrong
             # model name, rate limit).
             desc_errors = []
-            try:
-                desc_errors = converter.last_description_errors or []
-            except Exception:
-                pass
+            if converter is not None:
+                try:
+                    desc_errors = converter.last_description_errors or []
+                except Exception:
+                    pass
             if desc_errors:
                 # Emit a warning so the main window can record it on the
                 # log row and optionally toast the first line.
@@ -109,7 +125,9 @@ class ConversionJob(QRunnable):
 
             self.signals.progress.emit(self.job_id, self.source_path, 80)
 
-            with open(output_path, "w", encoding="utf-8") as f:
+            # Never silently overwrite a file that appeared after the output
+            # name was selected (for example by another process).
+            with open(output_path, "x", encoding="utf-8") as f:
                 f.write(markdown)
 
             self.signals.progress.emit(self.job_id, self.source_path, 100)
@@ -130,9 +148,13 @@ class ConversionJob(QRunnable):
         otherwise writes the placeholder.
         """
         description = describe_image_via_cache(self.source_path, self.settings)
+        try:
+            image_url = Path(self.source_path).resolve().as_uri()
+        except (OSError, ValueError):
+            image_url = self.source_path.replace("\\", "/")
         parts = [
             f"<!-- markitdown_gui: image conversion failed: {exc} -->",
-            f"![{os.path.basename(self.source_path)}]({self.source_path})",
+            f"![{os.path.basename(self.source_path)}]({image_url})",
             "",
             "# Description:",
             "",

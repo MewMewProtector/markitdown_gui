@@ -392,6 +392,39 @@ class TestToastCenterVariant(unittest.TestCase):
         finally:
             toast.deleteLater()
 
+    def test_toast_is_positioned_below_title_bar(self) -> None:
+        from PySide6.QtWidgets import QWidget
+
+        parent = QWidget()
+        parent.resize(900, 600)
+        toast = toast_bar.ToastBar(parent)
+        try:
+            toast.set_top_offset(46)
+            _x, y, _width = toast._target_geometry()
+            self.assertEqual(y, 46)
+            self.assertGreater(y, 34)
+        finally:
+            toast.deleteLater()
+            parent.deleteLater()
+
+    def test_hide_animation_fades_to_transparent(self) -> None:
+        from PySide6.QtWidgets import QWidget
+
+        parent = QWidget()
+        parent.resize(900, 600)
+        toast = toast_bar.ToastBar(parent)
+        try:
+            toast.show_message("Проверка", timeout_ms=0)
+            toast._animation_group.stop()
+            toast._opacity_effect.setOpacity(1.0)
+            toast.hide_animated()
+            self.assertEqual(toast._opacity_animation.endValue(), 0.0)
+            self.assertGreaterEqual(toast._opacity_animation.duration(), 400)
+        finally:
+            toast._animation_group.stop()
+            toast.deleteLater()
+            parent.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

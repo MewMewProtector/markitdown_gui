@@ -12,12 +12,13 @@ import os
 from typing import Iterable
 
 from PySide6.QtCore import QModelIndex, Qt, Signal
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -56,21 +57,64 @@ class ScanView(QWidget):
         super().__init__(parent)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(14)
 
-        # Toolbar ---------------------------------------------------
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        # Page header ------------------------------------------------
+        self.page_title = QLabel("Файлы", self)
+        self.page_title.setObjectName("PageTitle")
+        root.addWidget(self.page_title)
+        subtitle = QLabel(
+            "Добавляйте документы вручную или оставьте стриминг работать в фоне.",
+            self,
+        )
+        subtitle.setObjectName("PageSubtitle")
+        root.addWidget(subtitle)
+
+        # Drop zone --------------------------------------------------
+        drop_zone = QFrame(self)
+        drop_zone.setObjectName("DropZone")
+        drop_layout = QVBoxLayout(drop_zone)
+        drop_layout.setContentsMargins(20, 14, 20, 14)
+        drop_layout.setSpacing(6)
+
+        drop_title = QLabel("＋  Перетащите файлы или папку", drop_zone)
+        drop_title.setObjectName("DropTitle")
+        drop_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_layout.addWidget(drop_title)
+        drop_hint = QLabel(
+            "PDF, Office, изображения, текст, архивы, аудио и веб-ссылки",
+            drop_zone,
+        )
+        drop_hint.setObjectName("Muted")
+        drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_layout.addWidget(drop_hint)
+
+        add_actions = QHBoxLayout()
+        add_actions.addStretch(1)
 
         self.btn_add_files = QPushButton("Добавить файлы…", self)
+        self.btn_add_files.setObjectName("Primary")
         self.btn_add_files.clicked.connect(self._on_add_files)
-        toolbar.addWidget(self.btn_add_files)
+        add_actions.addWidget(self.btn_add_files)
 
         self.btn_add_folder = QPushButton("Добавить папку…", self)
         self.btn_add_folder.clicked.connect(self._on_add_folder)
-        toolbar.addWidget(self.btn_add_folder)
+        add_actions.addWidget(self.btn_add_folder)
+        add_actions.addStretch(1)
+        drop_layout.addLayout(add_actions)
+        root.addWidget(drop_zone)
 
+        # Command bar -----------------------------------------------
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
+
+        self.lbl_count = QLabel("Файлов: 0", self)
+        self.lbl_count.setObjectName("StatusBadge")
+        toolbar.addWidget(self.lbl_count)
+        self.lbl_progress = QLabel("Очередь пуста", self)
+        self.lbl_progress.setObjectName("Muted")
+        toolbar.addWidget(self.lbl_progress)
         toolbar.addStretch(1)
 
         self.btn_select_all = QPushButton("Выбрать все", self)
@@ -110,8 +154,7 @@ class ScanView(QWidget):
 
         # Empty-state hint ------------------------------------------
         self._empty_hint = QLabel(
-            "Перетащите файлы сюда или нажмите «Добавить файлы…».\n"
-            "При выборе папки в Настройках новые файлы будут появляться автоматически.",
+            "Очередь пока пуста.\nДобавленные документы появятся в этой таблице.",
             self.tree,
         )
         self._empty_hint.setObjectName("EmptyHint")
@@ -124,8 +167,12 @@ class ScanView(QWidget):
         self.model.rowsInserted.connect(self._update_empty_hint)
         self.model.rowsRemoved.connect(self._update_empty_hint)
         self.model.modelReset.connect(self._update_empty_hint)
+        self.model.rowsInserted.connect(self._refresh_summary)
+        self.model.rowsRemoved.connect(self._refresh_summary)
+        self.model.modelReset.connect(self._refresh_summary)
         self.tree.installEventFilter(self)
         self._update_empty_hint()
+        self._refresh_summary()
 
     # ------------------------------------------------------------------
     # Public API
@@ -186,11 +233,14 @@ class ScanView(QWidget):
         for r in range(self.model.rowCount()):
             item = self.model.item(r, self.COL_NAME)
             if item and item.data(self.PATH_ROLE) == path:
-                self.model.item(r, self.COL_STATUS).setText(status)
+                status_item = self.model.item(r, self.COL_STATUS)
+                status_item.setText(status)
+                status_item.setForeground(self._status_color(status))
                 if status == "готово":
                     f = self.model.item(r, self.COL_NAME).font()
                     f.setBold(False)
                     self.model.item(r, self.COL_NAME).setFont(f)
+                self._refresh_summary()
                 return
 
     def remove_row(self, path: str) -> None:
@@ -224,9 +274,50 @@ class ScanView(QWidget):
 
         status_item = QStandardItem(status)
         status_item.setEditable(False)
-        status_item.setForeground(Qt.GlobalColor.darkGray)
+        status_item.setForeground(self._status_color(status))
 
         self.model.appendRow([name_item, size_item, status_item])
+
+    @staticmethod
+    def _status_color(status: str) -> QColor:
+        value = status.lower()
+        if value == "готово" or value == "100%":
+            return QColor("#239B63")
+        if "ошиб" in value:
+            return QColor("#D9534F")
+        if "%" in value or "работ" in value:
+            return QColor("#2D7FF9")
+        if "нов" in value:
+            return QColor("#A66DD4")
+        return QColor("#727B84")
+
+    def _refresh_summary(self, *_args) -> None:
+        total = self.model.rowCount()
+        active = 0
+        failed = 0
+        ready = 0
+        for row in range(total):
+            item = self.model.item(row, self.COL_STATUS)
+            status = item.text().lower() if item else ""
+            if status == "готово":
+                ready += 1
+            elif "ошиб" in status:
+                failed += 1
+            elif "%" in status or "работ" in status or "ожидан" in status:
+                active += 1
+        self.lbl_count.setText(f"Файлов: {total}")
+        if not total:
+            summary = "Очередь пуста"
+        else:
+            parts = []
+            if active:
+                parts.append(f"в процессе: {active}")
+            if ready:
+                parts.append(f"готово: {ready}")
+            if failed:
+                parts.append(f"ошибки: {failed}")
+            summary = " · ".join(parts) if parts else "Готово к запуску"
+        self.lbl_progress.setText(summary)
 
     @staticmethod
     def _human_size(num: int) -> str:
@@ -283,9 +374,6 @@ class ScanView(QWidget):
 
         cb = QCheckBox("Описывать картинки (LLM)", dlg)
         cb.setChecked(config.get_setting("describe_images") == "1")
-        cb.toggled.connect(lambda checked: config.set_setting(
-            "describe_images", "1" if checked else "0"
-        ))
         layout.addWidget(cb)
 
         # Defensive hint: no API key set → warn the user that descriptions
@@ -316,6 +404,13 @@ class ScanView(QWidget):
         layout.addWidget(buttons)
 
         accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        if accepted:
+            # Treat Cancel as a real cancellation. Previously merely toggling
+            # the checkbox wrote to SQLite immediately, even if the user then
+            # pressed «Отмена».
+            config.set_setting(
+                "describe_images", "1" if cb.isChecked() else "0"
+            )
         return accepted
 
     # ------------------------------------------------------------------

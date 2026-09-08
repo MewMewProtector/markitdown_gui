@@ -66,7 +66,7 @@ def filter_supported(paths: list[str]) -> tuple[list[str], list[str]]:
     supported: list[str] = []
     unsupported: list[str] = []
     for p in paths:
-        if is_supported(p):
+        if is_supported(p) or is_url(p):
             supported.append(p)
         else:
             unsupported.append(p)

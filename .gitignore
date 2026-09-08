@@ -1,4 +1,8 @@
 _*
+!app/__init__.py
+!app/__main__.py
+!app/core/__init__.py
+!app/ui/__init__.py
 *.xml
 *.xlsx
 *.csv

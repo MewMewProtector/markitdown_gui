@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableView,
     QVBoxLayout,
@@ -44,6 +45,15 @@ class LogView(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
+
+        page_title = QLabel("Журнал", self)
+        page_title.setObjectName("PageTitle")
+        root.addWidget(page_title)
+        page_subtitle = QLabel(
+            "История конвертаций, предупреждения и ошибки обработки.", self
+        )
+        page_subtitle.setObjectName("PageSubtitle")
+        root.addWidget(page_subtitle)
 
         # Toolbar ---------------------------------------------------
         toolbar = QHBoxLayout()
@@ -123,6 +133,16 @@ class LogView(QWidget):
         self.proxy.setFilterFixedString(text)
 
     def _on_clear(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Очистить журнал?",
+            "Все записи о предыдущих конвертациях будут удалены. "
+            "Готовые Markdown-файлы останутся на диске.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         config.clear_log()
         self.refresh()
 

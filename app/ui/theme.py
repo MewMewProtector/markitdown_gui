@@ -161,24 +161,139 @@ def stylesheet_for(p: Palette) -> str:
     # `surface` and even past it on hover to keep the buttons clearly
     # visible against the title-bar background.
     is_dark_bg = QColor(p.bg).lightnessF() < 0.5
-    title_btn_bg = _blend(p.bg, p.surface, 0.85 if is_dark_bg else 0.55)
-    title_btn_border = _blend(p.bg, p.border, 0.7 if is_dark_bg else 0.45)
-    title_btn_hover_bg = _blend(p.bg, p.border, 0.9 if is_dark_bg else 0.55)
-    title_btn_pressed_bg = _blend(p.bg, p.border, 0.7 if is_dark_bg else 0.35)
+    # Window controls need stronger separation than ordinary surface cards:
+    # use the foreground colour as the blend target so the dark-theme result
+    # is not another barely different shade of grey.
+    title_btn_bg = _blend(p.bg, p.text, 0.12 if is_dark_bg else 0.08)
+    title_btn_border = _blend(p.bg, p.text, 0.28 if is_dark_bg else 0.18)
+    title_btn_hover_bg = _blend(p.bg, p.accent, 0.34 if is_dark_bg else 0.18)
+    title_btn_pressed_bg = _blend(p.bg, p.accent, 0.24 if is_dark_bg else 0.12)
+    accent_soft = _blend(p.surface, p.accent, 0.14 if is_dark_bg else 0.10)
+    accent_softer = _blend(p.surface, p.accent, 0.07 if is_dark_bg else 0.05)
+    danger_soft = _blend(p.surface, p.danger, 0.12)
     return f"""
     QWidget {{
-        background-color: {p.bg};
         color: {p.text};
-        font-family: "ALS Sector Regular", "ALS Sector", "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
+        font-family: "Segoe UI";
         font-size: 10pt;
     }}
     QMainWindow, QDialog {{
         background-color: {p.bg};
     }}
-    QFrame#Surface {{
+    QFrame#Surface, QWidget#Surface, QFrame#Card, QWidget#Card {{
         background-color: {p.surface};
         border: 1px solid {p.border};
+        border-radius: 12px;
+    }}
+    QWidget#ContentArea {{
+        background-color: {p.bg};
+    }}
+    QFrame#Navigation {{
+        background-color: {p.surface};
+        border: 0;
+        border-right: 1px solid {p.border};
+    }}
+    QLabel#NavLogo {{
+        background-color: {p.accent};
+        color: {accent_text};
         border-radius: 10px;
+        font-size: 13pt;
+        font-weight: 700;
+    }}
+    QLabel#NavBrand {{
+        font-size: 11pt;
+        font-weight: 700;
+    }}
+    QLabel#NavSection {{
+        color: {p.text_muted};
+        font-size: 8pt;
+        font-weight: 700;
+        padding: 0 8px 5px 8px;
+    }}
+    QPushButton#NavButton {{
+        background: transparent;
+        color: {p.text_muted};
+        border: 0;
+        border-radius: 9px;
+        padding: 10px 12px;
+        min-height: 22px;
+        text-align: left;
+        font-weight: 500;
+    }}
+    QPushButton#NavButton:hover {{
+        background-color: {accent_softer};
+        color: {p.text};
+    }}
+    QPushButton#NavButton:checked {{
+        background-color: {accent_soft};
+        color: {p.accent};
+        font-weight: 650;
+    }}
+    QFrame#NavStatus {{
+        background-color: {p.code_bg};
+        border: 1px solid {p.border};
+        border-radius: 10px;
+    }}
+    QFrame#NavStatus[active="true"] {{
+        background-color: {accent_soft};
+        border-color: {p.accent};
+    }}
+    QLabel#NavStatusTitle {{
+        background: transparent;
+        font-weight: 650;
+    }}
+    QLabel#PageTitle {{
+        font-family: "Segoe UI";
+        font-size: 20pt;
+        font-weight: 700;
+        padding: 0;
+    }}
+    QLabel#PageSubtitle {{
+        color: {p.text_muted};
+        font-size: 10pt;
+        padding-bottom: 2px;
+    }}
+    QFrame#DropZone {{
+        background-color: {accent_softer};
+        border: 1px dashed {p.accent};
+        border-radius: 14px;
+    }}
+    QLabel#DropTitle {{
+        color: {p.text};
+        font-size: 12pt;
+        font-weight: 650;
+        background: transparent;
+    }}
+    QLabel#StatusBadge {{
+        background-color: {p.code_bg};
+        border: 1px solid {p.border};
+        border-radius: 10px;
+        padding: 3px 10px;
+        font-weight: 600;
+    }}
+    QLabel#SectionTitle {{
+        font-size: 12pt;
+        font-weight: 700;
+        background: transparent;
+    }}
+    QLabel#SectionSubtitle {{
+        color: {p.text_muted};
+        background: transparent;
+    }}
+    QFrame#ConnectionStatus {{
+        background-color: {p.code_bg};
+        border: 1px solid {p.border};
+        border-radius: 8px;
+    }}
+    QPushButton#SegmentButton {{
+        border-radius: 7px;
+        padding: 5px 11px;
+    }}
+    QPushButton#SegmentButton:checked {{
+        background-color: {accent_soft};
+        color: {p.accent};
+        border-color: {p.accent};
+        font-weight: 650;
     }}
     QTabWidget::pane {{
         border: 0;
@@ -207,8 +322,8 @@ def stylesheet_for(p: Palette) -> str:
         color: {p.text};
         border: 1px solid {p.border};
         border-radius: 8px;
-        padding: 6px 14px;
-        min-height: 18px;
+        padding: 7px 14px;
+        min-height: 20px;
     }}
     QPushButton:hover {{
         border-color: {p.accent};
@@ -242,12 +357,12 @@ def stylesheet_for(p: Palette) -> str:
         color: {p.text};
         border: 1px solid {p.border};
         border-radius: 8px;
-        padding: 4px 8px;
+        padding: 6px 9px;
         selection-background-color: {p.accent};
         selection-color: #FFFFFF;
     }}
     QPlainTextEdit, QTextEdit {{
-        font-family: "JetBrains Mono", "Consolas", monospace;
+        font-family: "Consolas";
         font-size: 10pt;
     }}
     QHeaderView::section {{
@@ -261,6 +376,14 @@ def stylesheet_for(p: Palette) -> str:
     QTableView {{
         gridline-color: {p.border};
         alternate-background-color: {p.bg};
+    }}
+    QTreeView::item, QTableView::item {{
+        min-height: 28px;
+        border: 0;
+    }}
+    QTreeView::item:selected, QTableView::item:selected {{
+        background-color: {accent_soft};
+        color: {p.text};
     }}
     QCheckBox {{
         spacing: 8px;
@@ -321,6 +444,7 @@ def stylesheet_for(p: Palette) -> str:
     }}
     QLabel#Muted {{
         color: {p.text_muted};
+        background: transparent;
     }}
     QLabel#EmptyHint {{
         color: {p.text_muted};
@@ -331,7 +455,7 @@ def stylesheet_for(p: Palette) -> str:
     QLabel#TitleBarApp {{
         font-weight: 600;
     }}
-    QFrame#Toast {{
+    QFrame#Toast, QFrame#ToastError, QFrame#ToastCenter {{
         background-color: {p.surface};
         border: 1px solid {p.border};
         border-left: 4px solid {p.accent};
@@ -339,6 +463,7 @@ def stylesheet_for(p: Palette) -> str:
     }}
     QFrame#ToastError {{
         border-left-color: {p.danger};
+        background-color: {danger_soft};
     }}
     QFrame#ToastCenter {{
         background-color: {p.surface};
@@ -372,14 +497,22 @@ def stylesheet_for(p: Palette) -> str:
         color: {p.text};
         font-size: 11pt;
     }}
-    QPushButton#TitleButton:hover {{
+    QPushButton#TitleButton:hover, QPushButton#TitleButtonClose:hover {{
         background-color: {title_btn_hover_bg};
         border-color: {p.accent};
         color: {p.accent};
     }}
-    QPushButton#TitleButton:pressed {{
+    QPushButton#TitleButton:pressed, QPushButton#TitleButtonClose:pressed {{
         background-color: {title_btn_pressed_bg};
         color: {p.text};
+    }}
+    QPushButton#TitleButtonClose {{
+        background-color: {title_btn_bg};
+        border: 1px solid {title_btn_border};
+        border-radius: 6px;
+        padding: 4px 10px;
+        color: {p.text};
+        font-size: 11pt;
     }}
     QPushButton#TitleButtonClose:hover {{
         color: #FFFFFF;

@@ -97,6 +97,7 @@ class TitleBar(QWidget):
         self.btn_min = self._mk_icon_btn(_render_svg_icon("minimize", self._icon_text_color), "Свернуть")
         self.btn_max = self._mk_icon_btn(_render_svg_icon("maximize", self._icon_text_color), "Развернуть")
         self.btn_close = self._mk_icon_btn(_render_svg_icon("close", self._icon_text_color), "Закрыть")
+        self.btn_close.setObjectName("TitleButtonClose")
 
         self.btn_min.clicked.connect(self.minimize_clicked)
         self.btn_max.clicked.connect(self.maximize_clicked)
@@ -109,7 +110,7 @@ class TitleBar(QWidget):
     def _mk_icon_btn(self, icon: QIcon, tooltip: str) -> QPushButton:
         b = QPushButton(self)
         b.setIcon(icon)
-        b.setIconSize(QSize(12, 12))
+        b.setIconSize(QSize(14, 14))
         b.setFixedSize(40, self.HEIGHT)
         b.setToolTip(tooltip)
         b.setCursor(Qt.CursorShape.PointingHandCursor)

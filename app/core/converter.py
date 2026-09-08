@@ -19,6 +19,7 @@ import os
 import shutil
 import tempfile
 from typing import Any, Callable, Iterable, List, Tuple, Optional
+from urllib.parse import urlparse
 
 try:
     from markitdown import MarkItDown
@@ -32,7 +33,7 @@ from .file_filter import is_http_url
 from .image_descriptor import (
     DEFAULT_MODEL,
     DEFAULT_PROMPT,
-    describe_image_via_cache,
+    _make_openai_client,
     describe_image_with_error,
     is_image_file,
 )
@@ -48,6 +49,19 @@ def import_error() -> str | None:
 
 # Extensions for which we extract inline images and describe them.
 _INLINE_IMAGE_EXTS = {".pdf", ".docx", ".pptx", ".xlsx"}
+_AUDIO_EXTS = {".mp3", ".wav", ".m4a"}
+
+
+def _is_youtube_url(value: str) -> bool:
+    """Return True only for real YouTube hostnames, not lookalike domains."""
+    host = (urlparse(value).hostname or "").lower().rstrip(".")
+    return (
+        host == "youtu.be"
+        or host == "youtube.com"
+        or host.endswith(".youtube.com")
+        or host == "youtube-nocookie.com"
+        or host.endswith(".youtube-nocookie.com")
+    )
 
 # Progress mapping for the inline-image phase. After text extraction the
 # conversion job has emitted ~25%; we reserve 25..80 for image work and
@@ -102,7 +116,12 @@ class Converter:
             kwargs["docintel_endpoint"] = s["docintel_endpoint"]
 
         if s.get("enable_cu") == "1" and s.get("cu_endpoint"):
-            kwargs["az_content_understanding_endpoint"] = s["cu_endpoint"]
+            # MarkItDown 0.1.6 expects ``cu_endpoint`` / ``cu_analyzer_id``.
+            # The former ``az_content_understanding_endpoint`` name is simply
+            # ignored inside its ``**kwargs``, leaving the checkbox inert.
+            kwargs["cu_endpoint"] = s["cu_endpoint"]
+            if s.get("cu_analyzer_id"):
+                kwargs["cu_analyzer_id"] = s["cu_analyzer_id"]
 
         # LLM (OpenAI-compatible). Always pass when populated.
         if s.get("llm_api_key"):
@@ -122,16 +141,10 @@ class Converter:
         return MarkItDown(**kwargs)
 
     def _make_llm_client(self, s: dict[str, str]) -> Any:
-        try:
-            from openai import OpenAI  # type: ignore
-        except Exception:
-            return None
-        base_url = s.get("llm_base_url") or None
-        api_key = s["llm_api_key"]
-        try:
-            return OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
-        except Exception:
-            return None
+        # Use the same client factory as inline-image descriptions so direct
+        # image conversion also receives the OpenRouter identification
+        # headers and consistent OpenAI-compatible endpoint handling.
+        return _make_openai_client(s)
 
     # ------------------------------------------------------------------
     # Public
@@ -148,10 +161,18 @@ class Converter:
         # URLs are handled by markitdown directly — no inline-image
         # extraction makes sense for remote URLs.
         if is_http_url(path):
+            if _is_youtube_url(path) and self._settings.get("enable_youtube") != "1":
+                raise RuntimeError(
+                    "YouTube-транскрипция отключена в настройках."
+                )
             result = self.client().convert(path)
             return getattr(result, "text_content", "") or ""
 
         ext = os.path.splitext(path)[1].lower()
+        if ext in _AUDIO_EXTS and self._settings.get("enable_audio") != "1":
+            raise RuntimeError(
+                "Аудио-транскрипция отключена в настройках."
+            )
 
         # PDF: prefer the smart pymupdf extractor (better multi-column
         # layout), then optionally append LLM image descriptions.
@@ -352,9 +373,11 @@ class Converter:
                 section.append("")
                 current_page = page_num
 
-            section.append(
-                f"![{os.path.basename(file_path)}]({file_path})"
-            )
+            # ``file_path`` points into a temporary extraction directory that
+            # is deleted before this method returns. Emitting it as an image
+            # URL leaves every generated Markdown file with a broken link.
+            # Keep a useful source label while storing only durable content.
+            section.append(f"**Изображение: {os.path.basename(file_path)}**")
             section.append("")
             if description:
                 section.append(f"> {description}")

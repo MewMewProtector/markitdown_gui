@@ -4,13 +4,14 @@ options (LLM, DI, CU), plugin toggles.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -19,10 +20,41 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QVBoxLayout,
     QWidget,
+    QToolButton,
 )
 
 from ..core import config
 from .theme import DEFAULT_DARK_ACCENT, DEFAULT_LIGHT_ACCENT
+
+
+class _ConnectionSignals(QObject):
+    finished = Signal(bool, str)
+
+
+class _ConnectionTask(QRunnable):
+    """Check an OpenAI-compatible endpoint without blocking the UI."""
+
+    def __init__(self, settings: dict[str, str]):
+        super().__init__()
+        self.settings = settings
+        self.signals = _ConnectionSignals()
+
+    @Slot()
+    def run(self) -> None:
+        from ..core.image_descriptor import _make_openai_client_with_error
+
+        client, error = _make_openai_client_with_error(self.settings)
+        if client is None:
+            self.signals.finished.emit(False, error or "Не удалось создать клиент")
+            return
+        try:
+            client.models.list(timeout=10.0)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            detail = f"HTTP {status}: {exc}" if status else str(exc)
+            self.signals.finished.emit(False, detail)
+            return
+        self.signals.finished.emit(True, "Подключение установлено")
 
 
 class _ColorSwatchButton(QPushButton):
@@ -75,9 +107,13 @@ class SettingsView(QWidget):
     # Emitted AFTER settings are persisted to SQLite. The main window
     # shows a centered "Настройки сохранены" toast in response.
     settings_saved = Signal()
+    # Emitted when save() refused to write because of invalid streaming
+    # path configuration. Payload is a human-readable Russian message.
+    save_failed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        self._connection_task: _ConnectionTask | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -94,15 +130,28 @@ class SettingsView(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(16)
 
+        page_title = QLabel("Настройки", container)
+        page_title.setObjectName("PageTitle")
+        root.addWidget(page_title)
+        page_subtitle = QLabel(
+            "Настройте автоматизацию, внешний вид и подключение к моделям.",
+            container,
+        )
+        page_subtitle.setObjectName("PageSubtitle")
+        root.addWidget(page_subtitle)
+
         # --------------------------------------------------------------
         # Folders
         # --------------------------------------------------------------
-        folders = QWidget(container)
-        folders.setObjectName("Surface")
+        folders = QFrame(container)
+        folders.setObjectName("Card")
         fl = QVBoxLayout(folders)
         fl.setContentsMargins(16, 16, 16, 16)
         fl.setSpacing(8)
         fl.addWidget(self._section_label("Папки"))
+        fl.addWidget(self._make_muted_label(
+            "Откуда брать новые файлы и куда сохранять готовый Markdown."
+        ))
 
         self.edit_watch = QLineEdit(folders)
         self.edit_watch.setPlaceholderText("Не выбрано")
@@ -128,10 +177,10 @@ class SettingsView(QWidget):
 
         # Streaming mode toggle lives in the Folders section because it
         # governs what happens to NEW files arriving in the watched
-        # folder. When enabled, every supported file dropped into the
-        # watched folder is auto-converted to .md and placed into the
-        # output folder (or next to the source if output_folder is empty).
-        # The describe_images toggle governs LLM descriptions per-file as
+        # folder. When enabled, only files created/copied AFTER the
+        # watcher was started are auto-converted. The result is written
+        # to the external output folder declared below. The
+        # `describe_images` toggle governs LLM descriptions per-file as
         # usual, so PDFs / DOCX still get inline-image descriptions when
         # both toggles are on.
         self.cb_streaming_mode = QCheckBox(
@@ -139,18 +188,21 @@ class SettingsView(QWidget):
         )
         self.cb_streaming_mode.setToolTip(
             "При включении этого режима любой поддерживаемый файл, "
-            "появившийся в папке сканирования, сразу конвертируется в .md "
-            "и переносится в папку сохранения. Если включено "
-            "«Описывать картинки (LLM)», картинки в файлах также "
-            "описываются."
+            "появившийся в папке сканирования после запуска слежения, "
+            "конвертируется в .md и записывается в указанную ниже "
+            "папку сохранения. Если включено «Описывать картинки (LLM)», "
+            "картинки в файлах также описываются."
         )
         fl.addWidget(self.cb_streaming_mode)
 
-        # Defensive hint when streaming is enabled but no output folder is
-        # chosen: the converted .md files will land next to the source.
+        # Streaming requires an external output folder (so a freshly
+        # written .md cannot trigger another conversion). We make this
+        # explicit instead of falling back to "next to the source".
         self._streaming_hint = QLabel(
-            "Папка сохранения не выбрана - .md файлы будут создаваться "
-            "рядом с исходниками.",
+            "Для стриминга обязательно задайте внешнюю папку сохранения - "
+            "она не должна совпадать с папкой сканирования или "
+            "находиться внутри неё. Тогда .md файлы не попадут обратно "
+            "в папку сканирования и не вызовут бесконечный цикл.",
             folders,
         )
         self._streaming_hint.setObjectName("Muted")
@@ -158,17 +210,32 @@ class SettingsView(QWidget):
         self._streaming_hint.hide()
         fl.addWidget(self._streaming_hint)
 
+        # Inline error shown when the user clicks Save with an invalid
+        # streaming combination. The label is hidden on a successful
+        # save.
+        self._streaming_error = QLabel("", folders)
+        self._streaming_error.setObjectName("StreamingError")
+        self._streaming_error.setWordWrap(True)
+        self._streaming_error.setStyleSheet(
+            "color: #c0392b; font-size: 10pt;"
+        )
+        self._streaming_error.hide()
+        fl.addWidget(self._streaming_error)
+
         root.addWidget(folders)
 
         # --------------------------------------------------------------
         # Appearance
         # --------------------------------------------------------------
-        appearance = QWidget(container)
-        appearance.setObjectName("Surface")
+        appearance = QFrame(container)
+        appearance.setObjectName("Card")
         al = QVBoxLayout(appearance)
         al.setContentsMargins(16, 16, 16, 16)
         al.setSpacing(8)
         al.addWidget(self._section_label("Внешний вид"))
+        al.addWidget(self._make_muted_label(
+            "Тема и акцент применяются сразу, чтобы результат было видно до сохранения."
+        ))
 
         theme_row = QHBoxLayout()
         theme_row.addWidget(QLabel("Тема:", appearance))
@@ -221,12 +288,15 @@ class SettingsView(QWidget):
         # --------------------------------------------------------------
         # MarkItDown / API
         # --------------------------------------------------------------
-        api = QWidget(container)
-        api.setObjectName("Surface")
+        api = QFrame(container)
+        api.setObjectName("Card")
         apil = QVBoxLayout(api)
         apil.setContentsMargins(16, 16, 16, 16)
         apil.setSpacing(8)
-        apil.addWidget(self._section_label("MarkItDown / API"))
+        apil.addWidget(self._section_label("Модель и описание изображений"))
+        apil.addWidget(self._make_muted_label(
+            "Подойдёт OpenAI или любой совместимый сервис, включая OpenRouter и Ollama."
+        ))
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -237,31 +307,37 @@ class SettingsView(QWidget):
         self.edit_api_key = QLineEdit(api)
         self.edit_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.edit_api_key.setPlaceholderText("sk-…")
-        form.addRow("OpenAI API key:", self.edit_api_key)
+        key_widget = QWidget(api)
+        key_layout = QHBoxLayout(key_widget)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.setSpacing(8)
+        key_layout.addWidget(self.edit_api_key, 1)
+        self.btn_reveal_key = QPushButton("Показать", key_widget)
+        self.btn_reveal_key.setCheckable(True)
+        self.btn_reveal_key.toggled.connect(self._toggle_api_key_visibility)
+        key_layout.addWidget(self.btn_reveal_key)
+        form.addRow("API-ключ:", key_widget)
 
         self.edit_base_url = QLineEdit(api)
         self.edit_base_url.setPlaceholderText("https://api.openai.com/v1")
-        form.addRow("OpenAI base URL:", self.edit_base_url)
+        form.addRow("Адрес API:", self.edit_base_url)
 
         self.edit_model = QLineEdit(api)
         self.edit_model.setPlaceholderText("gpt-4o-mini")
-        form.addRow("Model:", self.edit_model)
+        form.addRow("Модель:", self.edit_model)
 
         self.edit_prompt = QLineEdit(api)
         self.edit_prompt.setPlaceholderText("Use markdown formatting")
-        form.addRow("Prompt:", self.edit_prompt)
+        form.addRow("Промпт:", self.edit_prompt)
 
         self.edit_docintel = QLineEdit(api)
         self.edit_docintel.setPlaceholderText("https://…cognitiveservices.azure.com/")
-        form.addRow("Document Intelligence endpoint:", self.edit_docintel)
 
         self.edit_cu = QLineEdit(api)
         self.edit_cu.setPlaceholderText("https://…api.cognitive.microsoft.com/")
-        form.addRow("Content Understanding endpoint:", self.edit_cu)
 
         self.edit_cu_id = QLineEdit(api)
         self.edit_cu_id.setPlaceholderText("analyzer-id")
-        form.addRow("CU analyzer id:", self.edit_cu_id)
 
         apil.addLayout(form)
 
@@ -274,6 +350,42 @@ class SettingsView(QWidget):
         )
         apil.addWidget(self.cb_describe_images)
 
+        connection_row = QHBoxLayout()
+        self.btn_test_connection = QPushButton("Проверить подключение", api)
+        self.btn_test_connection.clicked.connect(self._test_connection)
+        connection_row.addWidget(self.btn_test_connection)
+        self.lbl_connection = QLabel(
+            "Ключ хранится в защищённом хранилище Windows"
+            if config.secure_storage_available()
+            else "Системное хранилище недоступно — используется локальная база",
+            api,
+        )
+        self.lbl_connection.setObjectName("Muted")
+        connection_row.addWidget(self.lbl_connection, 1)
+        apil.addLayout(connection_row)
+
+        self.btn_advanced = QToolButton(api)
+        self.btn_advanced.setText("Расширенные параметры")
+        self.btn_advanced.setCheckable(True)
+        self.btn_advanced.setArrowType(Qt.ArrowType.RightArrow)
+        self.btn_advanced.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.btn_advanced.toggled.connect(self._toggle_advanced)
+        apil.addWidget(self.btn_advanced)
+
+        self.advanced_container = QWidget(api)
+        advanced_layout = QVBoxLayout(self.advanced_container)
+        advanced_layout.setContentsMargins(8, 2, 0, 0)
+        advanced_layout.setSpacing(8)
+        advanced_form = QFormLayout()
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(8)
+        advanced_form.addRow("Document Intelligence:", self.edit_docintel)
+        advanced_form.addRow("Content Understanding:", self.edit_cu)
+        advanced_form.addRow("ID анализатора CU:", self.edit_cu_id)
+        advanced_layout.addLayout(advanced_form)
+
         self.cb_plugins = QCheckBox("Использовать плагины", api)
         self.cb_docintel = QCheckBox("Включить Document Intelligence", api)
         self.cb_cu = QCheckBox("Включить Content Understanding", api)
@@ -283,7 +395,9 @@ class SettingsView(QWidget):
             self.cb_plugins, self.cb_docintel, self.cb_cu,
             self.cb_audio, self.cb_youtube,
         ):
-            apil.addWidget(cb)
+            advanced_layout.addWidget(cb)
+        self.advanced_container.hide()
+        apil.addWidget(self.advanced_container)
 
         root.addWidget(api)
 
@@ -323,7 +437,7 @@ class SettingsView(QWidget):
     @staticmethod
     def _section_label(text: str) -> QLabel:
         l = QLabel(text)
-        l.setStyleSheet("font-weight: 600; font-size: 11pt;")
+        l.setObjectName("SectionTitle")
         return l
 
     @staticmethod
@@ -337,6 +451,48 @@ class SettingsView(QWidget):
         folder = QFileDialog.getExistingDirectory(self, title)
         if folder:
             line_edit.setText(folder)
+
+    def _toggle_api_key_visibility(self, visible: bool) -> None:
+        self.edit_api_key.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        )
+        self.btn_reveal_key.setText("Скрыть" if visible else "Показать")
+
+    def _toggle_advanced(self, expanded: bool) -> None:
+        self.advanced_container.setVisible(expanded)
+        self.btn_advanced.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
+
+    def _test_connection(self) -> None:
+        if self._connection_task is not None:
+            return
+        settings = {
+            "llm_api_key": self.edit_api_key.text().strip(),
+            "llm_base_url": self.edit_base_url.text().strip(),
+            "llm_model": self.edit_model.text().strip(),
+        }
+        if not settings["llm_api_key"]:
+            self._on_connection_result(False, "Сначала введите API-ключ")
+            return
+        self.btn_test_connection.setEnabled(False)
+        self.btn_test_connection.setText("Проверяю…")
+        self.lbl_connection.setStyleSheet("")
+        self.lbl_connection.setText("Соединение с API…")
+        task = _ConnectionTask(settings)
+        task.signals.finished.connect(self._on_connection_result)
+        self._connection_task = task
+        QThreadPool.globalInstance().start(task)
+
+    @Slot(bool, str)
+    def _on_connection_result(self, success: bool, message: str) -> None:
+        self._connection_task = None
+        self.btn_test_connection.setEnabled(True)
+        self.btn_test_connection.setText("Проверить подключение")
+        self.lbl_connection.setText(("✓ " if success else "✕ ") + message)
+        self.lbl_connection.setStyleSheet(
+            "color: #239B63;" if success else "color: #D9534F;"
+        )
 
     def _on_swatch_changed(self, _hex: str) -> None:
         self.edit_light_hex.blockSignals(True)
@@ -410,8 +566,37 @@ class SettingsView(QWidget):
         self.cb_describe_images.setChecked(s.get("describe_images") == "1")
 
     def save(self) -> None:
-        config.set_setting("watch_folder", self.edit_watch.text().strip())
-        config.set_setting("output_folder", self.edit_output.text().strip())
+        """
+        Validate, then persist.
+
+        Streaming mode is gated by a path-validation step so that we
+        never persist a half-config that combines `streaming_mode = 1`
+        with an unusable pair of folders. If the configuration is
+        rejected we emit `save_failed` and **leave the form open** with
+        the relevant values untouched - existing keys (including the LLM
+        secrets) are NOT cleared on a failed save.
+        """
+        watch = self.edit_watch.text().strip()
+        output = self.edit_output.text().strip()
+        streaming_on = self.cb_streaming_mode.isChecked()
+
+        if streaming_on:
+            ok, msg = config.validate_streaming_paths(watch, output)
+            if not ok:
+                # Surface the error inline AND emit it for the toast
+                # bar; then abort before touching SQLite so existing
+                # values stay intact.
+                self._streaming_error.setText(msg)
+                self._streaming_error.show()
+                self.save_failed.emit(msg)
+                return
+        # Successful path: clear any leftover error message from a
+        # previous attempt.
+        self._streaming_error.hide()
+        self._streaming_error.setText("")
+
+        config.set_setting("watch_folder", watch)
+        config.set_setting("output_folder", output)
 
         theme_map = {0: "light", 1: "dark", 2: "system"}
         config.set_setting("theme", theme_map[self.combo_theme.currentIndex()])
@@ -438,7 +623,7 @@ class SettingsView(QWidget):
         )
         config.set_setting(
             "streaming_mode",
-            "1" if self.cb_streaming_mode.isChecked() else "0",
+            "1" if streaming_on else "0",
         )
 
         # Notify listeners (MainWindow) that persistence actually finished.
@@ -447,16 +632,14 @@ class SettingsView(QWidget):
     # ------------------------------------------------------------------
     def _update_streaming_hint(self) -> None:
         """
-        Show the "no output folder selected" hint when streaming mode is
-        enabled and the user hasn't picked an output folder - the .md
-        files will be created next to each source.
+        Show the streaming hint whenever the toggle is on, regardless of
+        whether an output folder is set. The hint now explains the
+        external-folder requirement instead of the old "next to source"
+        fallback.
         """
         if not hasattr(self, "_streaming_hint"):
             return
-        show = (
-            self.cb_streaming_mode.isChecked()
-            and not self.edit_output.text().strip()
-        )
+        show = self.cb_streaming_mode.isChecked()
         self._streaming_hint.setVisible(show)
 
     # ------------------------------------------------------------------
